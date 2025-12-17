@@ -1,15 +1,28 @@
-import React, { useState, useCallback } from 'react';
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Clio → Airtable Merger</title>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel">
+const { useState, useCallback } = React;
 
 // CSV Parser utility
 const parseCSV = (text) => {
   const lines = text.split(/\r?\n/).filter(line => line.trim());
   if (lines.length === 0) return { headers: [], rows: [] };
-  
+
   const parseRow = (row) => {
     const result = [];
     let current = '';
     let inQuotes = false;
-    
+
     for (let i = 0; i < row.length; i++) {
       const char = row[i];
       if (char === '"') {
@@ -29,7 +42,7 @@ const parseCSV = (text) => {
     result.push(current.trim());
     return result;
   };
-  
+
   const headers = parseRow(lines[0]);
   const rows = lines.slice(1).map(line => {
     const values = parseRow(line);
@@ -37,7 +50,7 @@ const parseCSV = (text) => {
     headers.forEach((h, i) => obj[h] = values[i] || '');
     return obj;
   });
-  
+
   return { headers, rows };
 };
 
@@ -63,17 +76,17 @@ const normalizeName = (lastName, firstName) => {
 // Parse event summary to extract client info
 const parseEventSummary = (summary) => {
   if (!summary) return { hearingType: '', clientName: '', aNumber: '', status: '' };
-  
+
   // Pattern: "RESCHEDULED ARL-MASTER-MENDEZ ALVARADO, NORMA ELIZABETH|A-203-599-282 (00026-Mendez Alvarado)"
   const result = { hearingType: '', clientName: '', aNumber: '', status: '', court: '', matterId: '' };
-  
+
   // Extract status (RESCHEDULED, CANCELLED, etc.)
   const statusMatch = summary.match(/^(RESCHEDULED|CANCELLED|CONFIRMED)\s+/i);
   if (statusMatch) {
     result.status = statusMatch[1].toUpperCase();
     summary = summary.slice(statusMatch[0].length);
   }
-  
+
   // Extract court code and hearing type (e.g., "ARL-MASTER-")
   const courtTypeMatch = summary.match(/^([A-Z]{2,4})-([A-Z]+)-/i);
   if (courtTypeMatch) {
@@ -81,59 +94,59 @@ const parseEventSummary = (summary) => {
     result.hearingType = courtTypeMatch[2].toUpperCase();
     summary = summary.slice(courtTypeMatch[0].length);
   }
-  
+
   // Extract A# (pattern: |A-###-###-### or A-###-###-###)
   const aNumMatch = summary.match(/\|?A-?(\d{3}-?\d{3}-?\d{3})/i);
   if (aNumMatch) {
     result.aNumber = normalizeANumber(aNumMatch[1]);
   }
-  
+
   // Extract client name (before the | or A-)
   const nameMatch = summary.match(/^([^|]+?)(?:\|A-|\s*\()/);
   if (nameMatch) {
     result.clientName = nameMatch[1].trim();
   }
-  
+
   // Extract matter ID (in parentheses at end)
   const matterMatch = summary.match(/\((\d+-[^)]+)\)/);
   if (matterMatch) {
     result.matterId = matterMatch[1];
   }
-  
+
   return result;
 };
 
 // Parse event description to extract judge, riders
 const parseEventDescription = (desc) => {
   if (!desc) return { judge: '', riders: [], courtAddress: '' };
-  
+
   const result = { judge: '', riders: [], courtAddress: '' };
-  
+
   // Extract riders
   const riderMatches = desc.matchAll(/RIDER:\s*([^|]+)\|A-Number:\s*([\d-]+)/gi);
   for (const match of riderMatches) {
     result.riders.push({ name: match[1].trim(), aNumber: normalizeANumber(match[2]) });
   }
-  
+
   // Extract judge
   const judgeMatch = desc.match(/JUDGE[:\s]+([^\n]+)/i);
   if (judgeMatch) {
     result.judge = judgeMatch[1].trim();
   }
-  
+
   // Extract court address
   const addressMatch = desc.match(/COURT ADDRESS[:\s]+([^\n]+(?:\n[^\n]+)?)/i);
   if (addressMatch) {
     result.courtAddress = addressMatch[1].replace(/\n/g, ', ').trim();
   }
-  
+
   return result;
 };
 
 // Parse matter field to extract client reference
 const parseMatterField = (matter) => {
   if (!matter) return { matterId: '', lastName: '' };
-  
+
   // Pattern: "00006-Hernandez"
   const match = matter.match(/(\d+)-(.+)/);
   if (match) {
@@ -151,7 +164,7 @@ const generateCSV = (headers, rows) => {
     }
     return str;
   };
-  
+
   const headerRow = headers.map(escapeField).join(',');
   const dataRows = rows.map(row => headers.map(h => escapeField(row[h])).join(','));
   return [headerRow, ...dataRows].join('\n');
@@ -179,21 +192,21 @@ const mapHearingType = (clioType) => {
 };
 
 // Main App Component
-export default function ClioAirtableMerger() {
+function ClioAirtableMerger() {
   const [files, setFiles] = useState({
     bahr: null,
     contacts: null,
     events: null,
     matterNotes: null,
   });
-  
+
   const [parsedData, setParsedData] = useState({
     bahr: null,
     contacts: null,
     events: null,
     matterNotes: null,
   });
-  
+
   const [mergeResult, setMergeResult] = useState(null);
   const [activeTab, setActiveTab] = useState('upload');
   const [validationReport, setValidationReport] = useState([]);
@@ -201,12 +214,12 @@ export default function ClioAirtableMerger() {
   const handleFileUpload = (type) => (event) => {
     const file = event.target.files[0];
     if (!file) return;
-    
+
     const reader = new FileReader();
     reader.onload = (e) => {
       const text = e.target.result;
       const parsed = parseCSV(text);
-      
+
       setFiles(prev => ({ ...prev, [type]: file }));
       setParsedData(prev => ({ ...prev, [type]: parsed }));
     };
@@ -215,20 +228,20 @@ export default function ClioAirtableMerger() {
 
   const performMerge = useCallback(() => {
     const reports = [];
-    
+
     // Step 1: Build lookup from Bahr dataset (authority for A#)
     const bahrLookup = new Map(); // name -> record
     const aNumberLookup = new Map(); // A# -> record
-    
+
     if (parsedData.bahr?.rows) {
       parsedData.bahr.rows.forEach((row, idx) => {
         const lastName = row['Last Name'] || '';
         const firstName = row['First Name'] || '';
         const middleName = row['Middle Name'] || '';
         const aNumber = normalizeANumber(row['A number'] || '');
-        
+
         const nameKey = normalizeName(lastName, firstName);
-        
+
         const record = {
           _source: 'bahr',
           _idx: idx,
@@ -248,26 +261,26 @@ export default function ClioAirtableMerger() {
           placeOfEntry: row['23. Place of Last Arrival to US'] || '',
           dob: row['DOB'] || '',
         };
-        
+
         bahrLookup.set(nameKey, record);
         if (aNumber) {
           aNumberLookup.set(aNumber, record);
         }
       });
     }
-    
+
     reports.push({ type: 'info', message: `Loaded ${bahrLookup.size} clients from Bahr dataset` });
-    
+
     // Step 2: Enrich with Clio Contacts (match by name)
     let contactMatches = 0;
     let contactMisses = 0;
-    
+
     if (parsedData.contacts?.rows) {
       parsedData.contacts.rows.forEach((row) => {
         const lastName = row['Last Name'] || '';
         const firstName = row['First Name'] || '';
         const nameKey = normalizeName(lastName, firstName);
-        
+
         if (bahrLookup.has(nameKey)) {
           const record = bahrLookup.get(nameKey);
           // Enrich with Clio contact data (prefer Clio if Bahr is empty)
@@ -282,24 +295,24 @@ export default function ClioAirtableMerger() {
         }
       });
     }
-    
+
     reports.push({ type: 'info', message: `Matched ${contactMatches} Clio contacts, ${contactMisses} unmatched` });
-    
+
     // Step 3: Parse Events
     const eventsOutput = [];
     let eventMatches = 0;
     let eventMisses = 0;
-    
+
     if (parsedData.events?.rows) {
       parsedData.events.rows.forEach((row) => {
         const summary = row['summary'] || '';
         const description = row['description'] || '';
         const startDateTime = row['start.dateTime'] || '';
         const location = row['location'] || '';
-        
+
         const summaryParsed = parseEventSummary(summary);
         const descParsed = parseEventDescription(description);
-        
+
         // Try to match client by A# first, then by name
         let matchedClient = null;
         if (summaryParsed.aNumber && aNumberLookup.has(summaryParsed.aNumber)) {
@@ -316,17 +329,17 @@ export default function ClioAirtableMerger() {
             }
           }
         }
-        
+
         if (!matchedClient) {
           eventMisses++;
           reports.push({ type: 'warning', message: `Event not matched: ${summary.slice(0, 60)}...` });
         }
-        
+
         // Check for conference data (Webex/Telephonic)
         const hasWebex = (row['conferenceData.conferenceSolution.name'] || '').toLowerCase().includes('webex') ||
                         (row['conferenceData.entryPoints.0.uri'] || '').includes('webex');
         const hasTelephonic = (row['conferenceData.entryPoints.1.entryPointType'] || '') === 'phone';
-        
+
         eventsOutput.push({
           'Hearing Date/Time': startDateTime,
           'Event Type': 'Hearing',
@@ -344,39 +357,39 @@ export default function ClioAirtableMerger() {
         });
       });
     }
-    
+
     reports.push({ type: 'info', message: `Processed ${eventsOutput.length} events, ${eventMatches} matched, ${eventMisses} unmatched` });
-    
+
     // Step 4: Parse Matter Notes
     const matterNotesOutput = [];
     let noteMatches = 0;
     let noteMisses = 0;
-    
+
     if (parsedData.matterNotes?.rows) {
       parsedData.matterNotes.rows.forEach((row) => {
         const matter = row['Matter'] || '';
         const detail = row['Detail'] || '';
         const date = row['Date'] || row['CreatedAt'] || '';
         const matterId = row['MatterId'] || '';
-        
+
         const matterParsed = parseMatterField(matter);
-        
+
         // Try to match by last name (partial match)
         let matchedClient = null;
         for (const [nameKey, record] of bahrLookup) {
-          if (nameKey.startsWith(matterParsed.lastName + '|') || 
+          if (nameKey.startsWith(matterParsed.lastName + '|') ||
               nameKey.includes(matterParsed.lastName)) {
             matchedClient = record;
             noteMatches++;
             break;
           }
         }
-        
+
         if (!matchedClient) {
           noteMisses++;
           reports.push({ type: 'warning', message: `Matter note not matched: ${matter}` });
         }
-        
+
         matterNotesOutput.push({
           'Note details': detail,
           'Date/Time in PP': date,
@@ -387,9 +400,9 @@ export default function ClioAirtableMerger() {
         });
       });
     }
-    
+
     reports.push({ type: 'info', message: `Processed ${matterNotesOutput.length} notes, ${noteMatches} matched, ${noteMisses} unmatched` });
-    
+
     // Step 5: Build Client Info output
     const clientsOutput = [];
     bahrLookup.forEach((record) => {
@@ -398,7 +411,7 @@ export default function ClioAirtableMerger() {
       if (country && !AIRTABLE_OPTIONS.country.some(c => c.toLowerCase() === country.toLowerCase())) {
         reports.push({ type: 'warning', message: `Unknown country: ${country} for ${record.firstName} ${record.lastName}` });
       }
-      
+
       clientsOutput.push({
         'First Name': record.firstName,
         'Middle Name': record.middleName,
@@ -417,7 +430,7 @@ export default function ClioAirtableMerger() {
         '_import_key': normalizeName(record.lastName, record.firstName),
       });
     });
-    
+
     // Generate linking script
     const linkingScript = `
 // Airtable Scripting Extension - Link Records by A#
@@ -448,7 +461,7 @@ let failedEvents = 0;
 for (const record of eventRecords.records) {
   const aNum = record.getCellValueAsString('_client_A#');
   const existingClient = record.getCellValue('Client');
-  
+
   if (aNum && !existingClient && aNumToRecordId.has(aNum)) {
     await eventsTable.updateRecordAsync(record.id, {
       'Client': [{ id: aNumToRecordId.get(aNum) }]
@@ -470,7 +483,7 @@ let failedCases = 0;
 for (const record of caseRecords.records) {
   const aNum = record.getCellValueAsString('_client_A#');
   const existingContact = record.getCellValue('Contact');
-  
+
   if (aNum && !existingContact && aNumToRecordId.has(aNum)) {
     await caseMasterTable.updateRecordAsync(record.id, {
       'Contact': [{ id: aNumToRecordId.get(aNum) }]
@@ -485,14 +498,14 @@ for (const record of caseRecords.records) {
 console.log(\`Linked \${linkedCases} case records, \${failedCases} failed\`);
 console.log('Done! You can now delete the _client_A# columns.');
 `;
-    
+
     setMergeResult({
       clients: clientsOutput,
       events: eventsOutput,
       matterNotes: matterNotesOutput,
       linkingScript,
     });
-    
+
     setValidationReport(reports);
     setActiveTab('results');
   }, [parsedData]);
@@ -530,9 +543,9 @@ console.log('Done! You can now delete the _client_A# columns.');
     }}>
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap');
-        
+
         * { box-sizing: border-box; }
-        
+
         .card {
           background: rgba(255, 255, 255, 0.03);
           border: 1px solid rgba(255, 255, 255, 0.08);
@@ -540,7 +553,7 @@ console.log('Done! You can now delete the _client_A# columns.');
           padding: 1.5rem;
           backdrop-filter: blur(10px);
         }
-        
+
         .upload-zone {
           border: 2px dashed rgba(99, 102, 241, 0.4);
           border-radius: 8px;
@@ -549,17 +562,17 @@ console.log('Done! You can now delete the _client_A# columns.');
           cursor: pointer;
           transition: all 0.2s;
         }
-        
+
         .upload-zone:hover {
           border-color: rgba(99, 102, 241, 0.8);
           background: rgba(99, 102, 241, 0.05);
         }
-        
+
         .upload-zone.has-file {
           border-color: #22c55e;
           background: rgba(34, 197, 94, 0.1);
         }
-        
+
         .btn {
           padding: 0.75rem 1.5rem;
           border-radius: 8px;
@@ -570,32 +583,32 @@ console.log('Done! You can now delete the _client_A# columns.');
           border: none;
           font-family: inherit;
         }
-        
+
         .btn-primary {
           background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
           color: white;
         }
-        
+
         .btn-primary:hover:not(:disabled) {
           transform: translateY(-2px);
           box-shadow: 0 4px 20px rgba(99, 102, 241, 0.4);
         }
-        
+
         .btn-primary:disabled {
           opacity: 0.5;
           cursor: not-allowed;
         }
-        
+
         .btn-secondary {
           background: rgba(255, 255, 255, 0.1);
           color: #e4e4e7;
           border: 1px solid rgba(255, 255, 255, 0.2);
         }
-        
+
         .btn-secondary:hover {
           background: rgba(255, 255, 255, 0.15);
         }
-        
+
         .tab {
           padding: 0.5rem 1rem;
           cursor: pointer;
@@ -603,14 +616,14 @@ console.log('Done! You can now delete the _client_A# columns.');
           transition: all 0.2s;
           color: #a1a1aa;
         }
-        
+
         .tab:hover { color: #e4e4e7; }
-        
+
         .tab.active {
           color: #6366f1;
           border-bottom-color: #6366f1;
         }
-        
+
         .badge {
           display: inline-block;
           padding: 0.25rem 0.5rem;
@@ -618,37 +631,37 @@ console.log('Done! You can now delete the _client_A# columns.');
           font-size: 0.75rem;
           font-weight: 600;
         }
-        
+
         .badge-info { background: rgba(59, 130, 246, 0.2); color: #60a5fa; }
         .badge-warning { background: rgba(245, 158, 11, 0.2); color: #fbbf24; }
         .badge-error { background: rgba(239, 68, 68, 0.2); color: #f87171; }
         .badge-success { background: rgba(34, 197, 94, 0.2); color: #4ade80; }
-        
+
         .table-container {
           overflow-x: auto;
           margin-top: 1rem;
         }
-        
+
         table {
           width: 100%;
           border-collapse: collapse;
           font-size: 0.8rem;
         }
-        
+
         th, td {
           padding: 0.5rem;
           text-align: left;
           border-bottom: 1px solid rgba(255, 255, 255, 0.1);
         }
-        
+
         th {
           background: rgba(99, 102, 241, 0.1);
           font-weight: 600;
           color: #a5b4fc;
         }
-        
+
         td { color: #d4d4d8; }
-        
+
         pre {
           background: #0d1117;
           border: 1px solid rgba(255, 255, 255, 0.1);
@@ -659,7 +672,7 @@ console.log('Done! You can now delete the _client_A# columns.');
           color: #7ee787;
         }
       `}</style>
-      
+
       <div style={{ maxWidth: '1200px', margin: '0 auto' }}>
         <header style={{ marginBottom: '2rem', textAlign: 'center' }}>
           <h1 style={{
@@ -676,7 +689,7 @@ console.log('Done! You can now delete the _client_A# columns.');
             Transform Clio exports into Airtable-ready CSVs with linked records
           </p>
         </header>
-        
+
         {/* Tabs */}
         <div style={{ display: 'flex', gap: '1rem', marginBottom: '1.5rem', borderBottom: '1px solid rgba(255,255,255,0.1)' }}>
           <div className={`tab ${activeTab === 'upload' ? 'active' : ''}`} onClick={() => setActiveTab('upload')}>
@@ -689,7 +702,7 @@ console.log('Done! You can now delete the _client_A# columns.');
             Results & Export
           </div>
         </div>
-        
+
         {/* Upload Tab */}
         {activeTab === 'upload' && (
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '1rem' }}>
@@ -705,7 +718,7 @@ console.log('Done! You can now delete the _client_A# columns.');
                   {required && <span className="badge badge-warning">Required</span>}
                 </h3>
                 <p style={{ fontSize: '0.75rem', color: '#71717a', marginBottom: '1rem' }}>{desc}</p>
-                
+
                 <label className={`upload-zone ${files[key] ? 'has-file' : ''}`}>
                   <input
                     type="file"
@@ -728,7 +741,7 @@ console.log('Done! You can now delete the _client_A# columns.');
                 </label>
               </div>
             ))}
-            
+
             <div style={{ gridColumn: '1 / -1', textAlign: 'center', marginTop: '1rem' }}>
               <button
                 className="btn btn-primary"
@@ -740,12 +753,12 @@ console.log('Done! You can now delete the _client_A# columns.');
             </div>
           </div>
         )}
-        
+
         {/* Preview Tab */}
         {activeTab === 'preview' && (
           <div className="card">
             <h3 style={{ marginBottom: '1rem' }}>Parsed Data Preview</h3>
-            
+
             {Object.entries(parsedData).map(([key, data]) => (
               data?.rows?.length > 0 && (
                 <div key={key} style={{ marginBottom: '2rem' }}>
@@ -777,13 +790,13 @@ console.log('Done! You can now delete the _client_A# columns.');
                 </div>
               )
             ))}
-            
+
             {!Object.values(parsedData).some(d => d?.rows?.length > 0) && (
               <p style={{ color: '#71717a', textAlign: 'center' }}>No data uploaded yet</p>
             )}
           </div>
         )}
-        
+
         {/* Results Tab */}
         {activeTab === 'results' && mergeResult && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
@@ -799,14 +812,14 @@ console.log('Done! You can now delete the _client_A# columns.');
                 ))}
               </div>
             </div>
-            
+
             {/* Download Buttons */}
             <div className="card">
               <h3 style={{ marginBottom: '1rem' }}>Download Outputs</h3>
               <p style={{ fontSize: '0.8rem', color: '#71717a', marginBottom: '1rem' }}>
                 Import in order: 1) Clients → 2) Events → 3) Case Master → 4) Run Linking Script
               </p>
-              
+
               <div style={{ display: 'flex', gap: '1rem', flexWrap: 'wrap' }}>
                 <button
                   className="btn btn-secondary"
@@ -818,7 +831,7 @@ console.log('Done! You can now delete the _client_A# columns.');
                 >
                   1. Clients CSV ({mergeResult.clients.length})
                 </button>
-                
+
                 <button
                   className="btn btn-secondary"
                   onClick={() => downloadCSV(
@@ -829,7 +842,7 @@ console.log('Done! You can now delete the _client_A# columns.');
                 >
                   2. Events CSV ({mergeResult.events.length})
                 </button>
-                
+
                 <button
                   className="btn btn-secondary"
                   onClick={() => downloadCSV(
@@ -840,7 +853,7 @@ console.log('Done! You can now delete the _client_A# columns.');
                 >
                   3. Case Master CSV ({mergeResult.matterNotes.length})
                 </button>
-                
+
                 <button
                   className="btn btn-primary"
                   onClick={downloadScript}
@@ -849,7 +862,7 @@ console.log('Done! You can now delete the _client_A# columns.');
                 </button>
               </div>
             </div>
-            
+
             {/* Preview Tables */}
             <div className="card">
               <h3 style={{ marginBottom: '1rem' }}>Clients Preview</h3>
@@ -878,7 +891,7 @@ console.log('Done! You can now delete the _client_A# columns.');
                 </table>
               </div>
             </div>
-            
+
             <div className="card">
               <h3 style={{ marginBottom: '1rem' }}>Events Preview</h3>
               <div className="table-container">
@@ -906,7 +919,7 @@ console.log('Done! You can now delete the _client_A# columns.');
                 </table>
               </div>
             </div>
-            
+
             {/* Linking Script Preview */}
             <div className="card">
               <h3 style={{ marginBottom: '1rem' }}>Linking Script Preview</h3>
@@ -917,7 +930,7 @@ console.log('Done! You can now delete the _client_A# columns.');
             </div>
           </div>
         )}
-        
+
         {activeTab === 'results' && !mergeResult && (
           <div className="card" style={{ textAlign: 'center', padding: '3rem' }}>
             <p style={{ color: '#71717a' }}>Run the merge to see results</p>
@@ -927,3 +940,10 @@ console.log('Done! You can now delete the _client_A# columns.');
     </div>
   );
 }
+
+// Render the app
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(<ClioAirtableMerger />);
+  </script>
+</body>
+</html>
