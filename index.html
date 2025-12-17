@@ -1,0 +1,929 @@
+import React, { useState, useCallback } from 'react';
+
+// CSV Parser utility
+const parseCSV = (text) => {
+  const lines = text.split(/\r?\n/).filter(line => line.trim());
+  if (lines.length === 0) return { headers: [], rows: [] };
+  
+  const parseRow = (row) => {
+    const result = [];
+    let current = '';
+    let inQuotes = false;
+    
+    for (let i = 0; i < row.length; i++) {
+      const char = row[i];
+      if (char === '"') {
+        if (inQuotes && row[i + 1] === '"') {
+          current += '"';
+          i++;
+        } else {
+          inQuotes = !inQuotes;
+        }
+      } else if (char === ',' && !inQuotes) {
+        result.push(current.trim());
+        current = '';
+      } else {
+        current += char;
+      }
+    }
+    result.push(current.trim());
+    return result;
+  };
+  
+  const headers = parseRow(lines[0]);
+  const rows = lines.slice(1).map(line => {
+    const values = parseRow(line);
+    const obj = {};
+    headers.forEach((h, i) => obj[h] = values[i] || '');
+    return obj;
+  });
+  
+  return { headers, rows };
+};
+
+// Normalize A# to ###-###-### format
+const normalizeANumber = (aNum) => {
+  if (!aNum) return '';
+  const digits = aNum.replace(/[^0-9]/g, '');
+  if (digits.length === 9) {
+    return `${digits.slice(0, 3)}-${digits.slice(3, 6)}-${digits.slice(6, 9)}`;
+  }
+  if (digits.length === 10 && digits[0] === '1') {
+    return `${digits.slice(1, 4)}-${digits.slice(4, 7)}-${digits.slice(7, 10)}`;
+  }
+  return digits;
+};
+
+// Normalize name for matching
+const normalizeName = (lastName, firstName) => {
+  const clean = (s) => (s || '').toUpperCase().trim().replace(/[^A-Z\s]/g, '');
+  return `${clean(lastName)}|${clean(firstName)}`;
+};
+
+// Parse event summary to extract client info
+const parseEventSummary = (summary) => {
+  if (!summary) return { hearingType: '', clientName: '', aNumber: '', status: '' };
+  
+  // Pattern: "RESCHEDULED ARL-MASTER-MENDEZ ALVARADO, NORMA ELIZABETH|A-203-599-282 (00026-Mendez Alvarado)"
+  const result = { hearingType: '', clientName: '', aNumber: '', status: '', court: '', matterId: '' };
+  
+  // Extract status (RESCHEDULED, CANCELLED, etc.)
+  const statusMatch = summary.match(/^(RESCHEDULED|CANCELLED|CONFIRMED)\s+/i);
+  if (statusMatch) {
+    result.status = statusMatch[1].toUpperCase();
+    summary = summary.slice(statusMatch[0].length);
+  }
+  
+  // Extract court code and hearing type (e.g., "ARL-MASTER-")
+  const courtTypeMatch = summary.match(/^([A-Z]{2,4})-([A-Z]+)-/i);
+  if (courtTypeMatch) {
+    result.court = courtTypeMatch[1].toUpperCase();
+    result.hearingType = courtTypeMatch[2].toUpperCase();
+    summary = summary.slice(courtTypeMatch[0].length);
+  }
+  
+  // Extract A# (pattern: |A-###-###-### or A-###-###-###)
+  const aNumMatch = summary.match(/\|?A-?(\d{3}-?\d{3}-?\d{3})/i);
+  if (aNumMatch) {
+    result.aNumber = normalizeANumber(aNumMatch[1]);
+  }
+  
+  // Extract client name (before the | or A-)
+  const nameMatch = summary.match(/^([^|]+?)(?:\|A-|\s*\()/);
+  if (nameMatch) {
+    result.clientName = nameMatch[1].trim();
+  }
+  
+  // Extract matter ID (in parentheses at end)
+  const matterMatch = summary.match(/\((\d+-[^)]+)\)/);
+  if (matterMatch) {
+    result.matterId = matterMatch[1];
+  }
+  
+  return result;
+};
+
+// Parse event description to extract judge, riders
+const parseEventDescription = (desc) => {
+  if (!desc) return { judge: '', riders: [], courtAddress: '' };
+  
+  const result = { judge: '', riders: [], courtAddress: '' };
+  
+  // Extract riders
+  const riderMatches = desc.matchAll(/RIDER:\s*([^|]+)\|A-Number:\s*([\d-]+)/gi);
+  for (const match of riderMatches) {
+    result.riders.push({ name: match[1].trim(), aNumber: normalizeANumber(match[2]) });
+  }
+  
+  // Extract judge
+  const judgeMatch = desc.match(/JUDGE[:\s]+([^\n]+)/i);
+  if (judgeMatch) {
+    result.judge = judgeMatch[1].trim();
+  }
+  
+  // Extract court address
+  const addressMatch = desc.match(/COURT ADDRESS[:\s]+([^\n]+(?:\n[^\n]+)?)/i);
+  if (addressMatch) {
+    result.courtAddress = addressMatch[1].replace(/\n/g, ', ').trim();
+  }
+  
+  return result;
+};
+
+// Parse matter field to extract client reference
+const parseMatterField = (matter) => {
+  if (!matter) return { matterId: '', lastName: '' };
+  
+  // Pattern: "00006-Hernandez"
+  const match = matter.match(/(\d+)-(.+)/);
+  if (match) {
+    return { matterId: match[1], lastName: match[2].trim().toUpperCase() };
+  }
+  return { matterId: '', lastName: matter.toUpperCase() };
+};
+
+// Generate CSV string from data
+const generateCSV = (headers, rows) => {
+  const escapeField = (field) => {
+    const str = String(field || '');
+    if (str.includes(',') || str.includes('"') || str.includes('\n')) {
+      return `"${str.replace(/"/g, '""')}"`;
+    }
+    return str;
+  };
+  
+  const headerRow = headers.map(escapeField).join(',');
+  const dataRows = rows.map(row => headers.map(h => escapeField(row[h])).join(','));
+  return [headerRow, ...dataRows].join('\n');
+};
+
+// Airtable select field options for validation
+const AIRTABLE_OPTIONS = {
+  eventType: ['Hearing', 'Interview', 'ICE Appt', 'Status Conference', 'Bond', 'CFI/RFI', 'Brief Due', 'Calendar Control', 'Test Event'],
+  eventSubType: ['Master', 'Individual', 'Pre-Hearing Conf', 'Call Up Date', 'Asylum Interview', 'USCIS Interview', 'Status Docket', 'Appeal Notice Due'],
+  eventHearingType: ['Master', 'Individual', 'Bond', 'Status Docket', 'Custody', 'Calendar Control', 'Pending ICH Decision'],
+  country: ['Afghanistan', 'Albania', 'Algeria', 'Argentina', 'Bahamas', 'Belize', 'Bolivia', 'Brazil', 'Burma', 'Burundi', 'Cameroon', 'Canada', 'Chile', 'China', 'Colombia', 'Costa Rica', 'Cuba', 'Dominican Republic', 'Ecuador', 'Egypt', 'El Salvador', 'Ethiopia', 'Ghana', 'Guatemala', 'Guinea', 'Haiti', 'Honduras', 'India', 'Iran', 'Iraq', 'Jamaica', 'Jordan', 'Kenya', 'Lebanon', 'Liberia', 'Malaysia', 'Mauritania', 'Mexico', 'Mongolia', 'Morocco', 'Nepal', 'Nicaragua', 'Nigeria', 'Pakistan', 'Panama', 'Peru', 'Philippines', 'Romania', 'Russia', 'Sierra Leone', 'Somalia', 'South Africa', 'South Korea', 'Sudan', 'Syria', 'Taiwan', 'Tanzania', 'Thailand', 'Tunisia', 'Turkiye', 'Turkey', 'Uganda', 'Ukraine', 'United Kingdom', 'United States', 'USA', 'Venezuela', 'Vietnam', 'Yemen'],
+};
+
+// Map hearing type from Clio to Airtable
+const mapHearingType = (clioType) => {
+  const mapping = {
+    'MASTER': 'Master',
+    'INDIVIDUAL': 'Individual',
+    'ICH': 'Individual',
+    'MCH': 'Master',
+    'BOND': 'Bond',
+    'STATUS': 'Status Docket',
+  };
+  return mapping[clioType?.toUpperCase()] || clioType;
+};
+
+// Main App Component
+export default function ClioAirtableMerger() {
+  const [files, setFiles] = useState({
+    bahr: null,
+    contacts: null,
+    events: null,
+    matterNotes: null,
+  });
+  
+  const [parsedData, setParsedData] = useState({
+    bahr: null,
+    contacts: null,
+    events: null,
+    matterNotes: null,
+  });
+  
+  const [mergeResult, setMergeResult] = useState(null);
+  const [activeTab, setActiveTab] = useState('upload');
+  const [validationReport, setValidationReport] = useState([]);
+
+  const handleFileUpload = (type) => (event) => {
+    const file = event.target.files[0];
+    if (!file) return;
+    
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const text = e.target.result;
+      const parsed = parseCSV(text);
+      
+      setFiles(prev => ({ ...prev, [type]: file }));
+      setParsedData(prev => ({ ...prev, [type]: parsed }));
+    };
+    reader.readAsText(file);
+  };
+
+  const performMerge = useCallback(() => {
+    const reports = [];
+    
+    // Step 1: Build lookup from Bahr dataset (authority for A#)
+    const bahrLookup = new Map(); // name -> record
+    const aNumberLookup = new Map(); // A# -> record
+    
+    if (parsedData.bahr?.rows) {
+      parsedData.bahr.rows.forEach((row, idx) => {
+        const lastName = row['Last Name'] || '';
+        const firstName = row['First Name'] || '';
+        const middleName = row['Middle Name'] || '';
+        const aNumber = normalizeANumber(row['A number'] || '');
+        
+        const nameKey = normalizeName(lastName, firstName);
+        
+        const record = {
+          _source: 'bahr',
+          _idx: idx,
+          lastName,
+          firstName,
+          middleName,
+          aNumber,
+          phone: row['Telphone Number'] || '',
+          email: row['Email'] || '',
+          addressLine1: row['Street Number and Name'] || '',
+          addressLine2: [row['Address line 2'], row['AptSte'], row['FlrNumber']].filter(Boolean).join(' '),
+          state: row['State'] || '',
+          city: row['City'] || '',
+          zip: row['zipcode'] || '',
+          country: row['18.a. Country of Citizenship or Nationality'] || '',
+          entryDate: row['22. Date of Last Arrival into United States'] || '',
+          placeOfEntry: row['23. Place of Last Arrival to US'] || '',
+          dob: row['DOB'] || '',
+        };
+        
+        bahrLookup.set(nameKey, record);
+        if (aNumber) {
+          aNumberLookup.set(aNumber, record);
+        }
+      });
+    }
+    
+    reports.push({ type: 'info', message: `Loaded ${bahrLookup.size} clients from Bahr dataset` });
+    
+    // Step 2: Enrich with Clio Contacts (match by name)
+    let contactMatches = 0;
+    let contactMisses = 0;
+    
+    if (parsedData.contacts?.rows) {
+      parsedData.contacts.rows.forEach((row) => {
+        const lastName = row['Last Name'] || '';
+        const firstName = row['First Name'] || '';
+        const nameKey = normalizeName(lastName, firstName);
+        
+        if (bahrLookup.has(nameKey)) {
+          const record = bahrLookup.get(nameKey);
+          // Enrich with Clio contact data (prefer Clio if Bahr is empty)
+          if (!record.phone && row['Mobile Phone']) record.phone = row['Mobile Phone'];
+          if (!record.phone && row['Primary Phone']) record.phone = row['Primary Phone'];
+          if (!record.email && row['E-mail Address']) record.email = row['E-mail Address'];
+          record._clioContactId = row['UniqueId'] || '';
+          contactMatches++;
+        } else {
+          contactMisses++;
+          reports.push({ type: 'warning', message: `Clio contact not in Bahr: ${firstName} ${lastName}` });
+        }
+      });
+    }
+    
+    reports.push({ type: 'info', message: `Matched ${contactMatches} Clio contacts, ${contactMisses} unmatched` });
+    
+    // Step 3: Parse Events
+    const eventsOutput = [];
+    let eventMatches = 0;
+    let eventMisses = 0;
+    
+    if (parsedData.events?.rows) {
+      parsedData.events.rows.forEach((row) => {
+        const summary = row['summary'] || '';
+        const description = row['description'] || '';
+        const startDateTime = row['start.dateTime'] || '';
+        const location = row['location'] || '';
+        
+        const summaryParsed = parseEventSummary(summary);
+        const descParsed = parseEventDescription(description);
+        
+        // Try to match client by A# first, then by name
+        let matchedClient = null;
+        if (summaryParsed.aNumber && aNumberLookup.has(summaryParsed.aNumber)) {
+          matchedClient = aNumberLookup.get(summaryParsed.aNumber);
+          eventMatches++;
+        } else if (summaryParsed.clientName) {
+          // Try to parse "LASTNAME, FIRSTNAME" format
+          const nameParts = summaryParsed.clientName.split(',').map(s => s.trim());
+          if (nameParts.length >= 2) {
+            const nameKey = normalizeName(nameParts[0], nameParts[1]);
+            if (bahrLookup.has(nameKey)) {
+              matchedClient = bahrLookup.get(nameKey);
+              eventMatches++;
+            }
+          }
+        }
+        
+        if (!matchedClient) {
+          eventMisses++;
+          reports.push({ type: 'warning', message: `Event not matched: ${summary.slice(0, 60)}...` });
+        }
+        
+        // Check for conference data (Webex/Telephonic)
+        const hasWebex = (row['conferenceData.conferenceSolution.name'] || '').toLowerCase().includes('webex') ||
+                        (row['conferenceData.entryPoints.0.uri'] || '').includes('webex');
+        const hasTelephonic = (row['conferenceData.entryPoints.1.entryPointType'] || '') === 'phone';
+        
+        eventsOutput.push({
+          'Hearing Date/Time': startDateTime,
+          'Event Type': 'Hearing',
+          'Event Hearing Type': mapHearingType(summaryParsed.hearingType),
+          'Court': location || summaryParsed.court,
+          'Judge': descParsed.judge,
+          'Webex': hasWebex ? 'TRUE' : 'FALSE',
+          'Telephonic': hasTelephonic ? 'TRUE' : 'FALSE',
+          '_client_A#': matchedClient?.aNumber || summaryParsed.aNumber || '',
+          '_client_name': matchedClient ? `${matchedClient.lastName}, ${matchedClient.firstName}` : summaryParsed.clientName,
+          '_status': summaryParsed.status,
+          '_matter_id': summaryParsed.matterId,
+          '_riders': descParsed.riders.map(r => `${r.name}|${r.aNumber}`).join('; '),
+          '_original_summary': summary,
+        });
+      });
+    }
+    
+    reports.push({ type: 'info', message: `Processed ${eventsOutput.length} events, ${eventMatches} matched, ${eventMisses} unmatched` });
+    
+    // Step 4: Parse Matter Notes
+    const matterNotesOutput = [];
+    let noteMatches = 0;
+    let noteMisses = 0;
+    
+    if (parsedData.matterNotes?.rows) {
+      parsedData.matterNotes.rows.forEach((row) => {
+        const matter = row['Matter'] || '';
+        const detail = row['Detail'] || '';
+        const date = row['Date'] || row['CreatedAt'] || '';
+        const matterId = row['MatterId'] || '';
+        
+        const matterParsed = parseMatterField(matter);
+        
+        // Try to match by last name (partial match)
+        let matchedClient = null;
+        for (const [nameKey, record] of bahrLookup) {
+          if (nameKey.startsWith(matterParsed.lastName + '|') || 
+              nameKey.includes(matterParsed.lastName)) {
+            matchedClient = record;
+            noteMatches++;
+            break;
+          }
+        }
+        
+        if (!matchedClient) {
+          noteMisses++;
+          reports.push({ type: 'warning', message: `Matter note not matched: ${matter}` });
+        }
+        
+        matterNotesOutput.push({
+          'Note details': detail,
+          'Date/Time in PP': date,
+          'PP ID': matterId,
+          '_client_A#': matchedClient?.aNumber || '',
+          '_client_name': matchedClient ? `${matchedClient.lastName}, ${matchedClient.firstName}` : matter,
+          '_matter': matter,
+        });
+      });
+    }
+    
+    reports.push({ type: 'info', message: `Processed ${matterNotesOutput.length} notes, ${noteMatches} matched, ${noteMisses} unmatched` });
+    
+    // Step 5: Build Client Info output
+    const clientsOutput = [];
+    bahrLookup.forEach((record) => {
+      // Validate country against allowed options
+      let country = record.country;
+      if (country && !AIRTABLE_OPTIONS.country.some(c => c.toLowerCase() === country.toLowerCase())) {
+        reports.push({ type: 'warning', message: `Unknown country: ${country} for ${record.firstName} ${record.lastName}` });
+      }
+      
+      clientsOutput.push({
+        'First Name': record.firstName,
+        'Middle Name': record.middleName,
+        'Family Name': record.lastName,
+        'A#': record.aNumber,
+        'Phone Number': record.phone,
+        'Client Email': record.email,
+        'Address Line 1': record.addressLine1,
+        'Address Line 2': record.addressLine2,
+        'City': record.city,
+        'Zip (5)': record.zip,
+        'Country': country,
+        'Entry Date': record.entryDate,
+        'Place of Entry': record.placeOfEntry,
+        'DOB': record.dob,
+        '_import_key': normalizeName(record.lastName, record.firstName),
+      });
+    });
+    
+    // Generate linking script
+    const linkingScript = `
+// Airtable Scripting Extension - Link Records by A#
+// Run this AFTER importing all three CSVs
+
+const clientsTable = base.getTable('Client Info');
+const eventsTable = base.getTable('Events');
+const caseMasterTable = base.getTable('Case Master View // Activities');
+
+// Build A# -> Record ID lookup from Client Info
+const clientRecords = await clientsTable.selectRecordsAsync({ fields: ['A#'] });
+const aNumToRecordId = new Map();
+
+for (const record of clientRecords.records) {
+  const aNum = record.getCellValueAsString('A#');
+  if (aNum) {
+    aNumToRecordId.set(aNum, record.id);
+  }
+}
+
+console.log(\`Loaded \${aNumToRecordId.size} clients with A#\`);
+
+// Link Events to Clients
+const eventRecords = await eventsTable.selectRecordsAsync({ fields: ['_client_A#', 'Client'] });
+let linkedEvents = 0;
+let failedEvents = 0;
+
+for (const record of eventRecords.records) {
+  const aNum = record.getCellValueAsString('_client_A#');
+  const existingClient = record.getCellValue('Client');
+  
+  if (aNum && !existingClient && aNumToRecordId.has(aNum)) {
+    await eventsTable.updateRecordAsync(record.id, {
+      'Client': [{ id: aNumToRecordId.get(aNum) }]
+    });
+    linkedEvents++;
+  } else if (aNum && !aNumToRecordId.has(aNum)) {
+    failedEvents++;
+    console.log(\`No client found for A#: \${aNum}\`);
+  }
+}
+
+console.log(\`Linked \${linkedEvents} events, \${failedEvents} failed\`);
+
+// Link Case Master View to Clients
+const caseRecords = await caseMasterTable.selectRecordsAsync({ fields: ['_client_A#', 'Contact'] });
+let linkedCases = 0;
+let failedCases = 0;
+
+for (const record of caseRecords.records) {
+  const aNum = record.getCellValueAsString('_client_A#');
+  const existingContact = record.getCellValue('Contact');
+  
+  if (aNum && !existingContact && aNumToRecordId.has(aNum)) {
+    await caseMasterTable.updateRecordAsync(record.id, {
+      'Contact': [{ id: aNumToRecordId.get(aNum) }]
+    });
+    linkedCases++;
+  } else if (aNum && !aNumToRecordId.has(aNum)) {
+    failedCases++;
+    console.log(\`No client found for A#: \${aNum}\`);
+  }
+}
+
+console.log(\`Linked \${linkedCases} case records, \${failedCases} failed\`);
+console.log('Done! You can now delete the _client_A# columns.');
+`;
+    
+    setMergeResult({
+      clients: clientsOutput,
+      events: eventsOutput,
+      matterNotes: matterNotesOutput,
+      linkingScript,
+    });
+    
+    setValidationReport(reports);
+    setActiveTab('results');
+  }, [parsedData]);
+
+  const downloadCSV = (data, filename, headers) => {
+    const csv = generateCSV(headers, data);
+    const blob = new Blob([csv], { type: 'text/csv' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const downloadScript = () => {
+    const blob = new Blob([mergeResult.linkingScript], { type: 'text/javascript' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'airtable_link_records.js';
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const canMerge = parsedData.bahr?.rows?.length > 0;
+
+  return (
+    <div style={{
+      minHeight: '100vh',
+      background: 'linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%)',
+      fontFamily: "'JetBrains Mono', 'Fira Code', monospace",
+      color: '#e4e4e7',
+      padding: '2rem',
+    }}>
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap');
+        
+        * { box-sizing: border-box; }
+        
+        .card {
+          background: rgba(255, 255, 255, 0.03);
+          border: 1px solid rgba(255, 255, 255, 0.08);
+          border-radius: 12px;
+          padding: 1.5rem;
+          backdrop-filter: blur(10px);
+        }
+        
+        .upload-zone {
+          border: 2px dashed rgba(99, 102, 241, 0.4);
+          border-radius: 8px;
+          padding: 2rem;
+          text-align: center;
+          cursor: pointer;
+          transition: all 0.2s;
+        }
+        
+        .upload-zone:hover {
+          border-color: rgba(99, 102, 241, 0.8);
+          background: rgba(99, 102, 241, 0.05);
+        }
+        
+        .upload-zone.has-file {
+          border-color: #22c55e;
+          background: rgba(34, 197, 94, 0.1);
+        }
+        
+        .btn {
+          padding: 0.75rem 1.5rem;
+          border-radius: 8px;
+          font-weight: 600;
+          font-size: 0.875rem;
+          cursor: pointer;
+          transition: all 0.2s;
+          border: none;
+          font-family: inherit;
+        }
+        
+        .btn-primary {
+          background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
+          color: white;
+        }
+        
+        .btn-primary:hover:not(:disabled) {
+          transform: translateY(-2px);
+          box-shadow: 0 4px 20px rgba(99, 102, 241, 0.4);
+        }
+        
+        .btn-primary:disabled {
+          opacity: 0.5;
+          cursor: not-allowed;
+        }
+        
+        .btn-secondary {
+          background: rgba(255, 255, 255, 0.1);
+          color: #e4e4e7;
+          border: 1px solid rgba(255, 255, 255, 0.2);
+        }
+        
+        .btn-secondary:hover {
+          background: rgba(255, 255, 255, 0.15);
+        }
+        
+        .tab {
+          padding: 0.5rem 1rem;
+          cursor: pointer;
+          border-bottom: 2px solid transparent;
+          transition: all 0.2s;
+          color: #a1a1aa;
+        }
+        
+        .tab:hover { color: #e4e4e7; }
+        
+        .tab.active {
+          color: #6366f1;
+          border-bottom-color: #6366f1;
+        }
+        
+        .badge {
+          display: inline-block;
+          padding: 0.25rem 0.5rem;
+          border-radius: 4px;
+          font-size: 0.75rem;
+          font-weight: 600;
+        }
+        
+        .badge-info { background: rgba(59, 130, 246, 0.2); color: #60a5fa; }
+        .badge-warning { background: rgba(245, 158, 11, 0.2); color: #fbbf24; }
+        .badge-error { background: rgba(239, 68, 68, 0.2); color: #f87171; }
+        .badge-success { background: rgba(34, 197, 94, 0.2); color: #4ade80; }
+        
+        .table-container {
+          overflow-x: auto;
+          margin-top: 1rem;
+        }
+        
+        table {
+          width: 100%;
+          border-collapse: collapse;
+          font-size: 0.8rem;
+        }
+        
+        th, td {
+          padding: 0.5rem;
+          text-align: left;
+          border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+        }
+        
+        th {
+          background: rgba(99, 102, 241, 0.1);
+          font-weight: 600;
+          color: #a5b4fc;
+        }
+        
+        td { color: #d4d4d8; }
+        
+        pre {
+          background: #0d1117;
+          border: 1px solid rgba(255, 255, 255, 0.1);
+          border-radius: 8px;
+          padding: 1rem;
+          overflow-x: auto;
+          font-size: 0.75rem;
+          color: #7ee787;
+        }
+      `}</style>
+      
+      <div style={{ maxWidth: '1200px', margin: '0 auto' }}>
+        <header style={{ marginBottom: '2rem', textAlign: 'center' }}>
+          <h1 style={{
+            fontSize: '2rem',
+            fontWeight: '700',
+            background: 'linear-gradient(135deg, #6366f1 0%, #a855f7 50%, #ec4899 100%)',
+            WebkitBackgroundClip: 'text',
+            WebkitTextFillColor: 'transparent',
+            marginBottom: '0.5rem',
+          }}>
+            Clio → Airtable Merger
+          </h1>
+          <p style={{ color: '#71717a', fontSize: '0.875rem' }}>
+            Transform Clio exports into Airtable-ready CSVs with linked records
+          </p>
+        </header>
+        
+        {/* Tabs */}
+        <div style={{ display: 'flex', gap: '1rem', marginBottom: '1.5rem', borderBottom: '1px solid rgba(255,255,255,0.1)' }}>
+          <div className={`tab ${activeTab === 'upload' ? 'active' : ''}`} onClick={() => setActiveTab('upload')}>
+            Upload Files
+          </div>
+          <div className={`tab ${activeTab === 'preview' ? 'active' : ''}`} onClick={() => setActiveTab('preview')}>
+            Preview Data
+          </div>
+          <div className={`tab ${activeTab === 'results' ? 'active' : ''}`} onClick={() => setActiveTab('results')}>
+            Results & Export
+          </div>
+        </div>
+        
+        {/* Upload Tab */}
+        {activeTab === 'upload' && (
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '1rem' }}>
+            {[
+              { key: 'bahr', label: 'Bahr Dataset (Authority)', desc: 'Contains A#s and client info', required: true },
+              { key: 'contacts', label: 'Clio Contacts Export', desc: 'Additional contact details', required: false },
+              { key: 'events', label: 'Clio Events Export', desc: 'Hearings from Google Calendar', required: false },
+              { key: 'matterNotes', label: 'Clio Matter Notes', desc: 'Case notes and details', required: false },
+            ].map(({ key, label, desc, required }) => (
+              <div key={key} className="card">
+                <h3 style={{ fontSize: '0.875rem', marginBottom: '0.5rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                  {label}
+                  {required && <span className="badge badge-warning">Required</span>}
+                </h3>
+                <p style={{ fontSize: '0.75rem', color: '#71717a', marginBottom: '1rem' }}>{desc}</p>
+                
+                <label className={`upload-zone ${files[key] ? 'has-file' : ''}`}>
+                  <input
+                    type="file"
+                    accept=".csv"
+                    onChange={handleFileUpload(key)}
+                    style={{ display: 'none' }}
+                  />
+                  {files[key] ? (
+                    <div>
+                      <span style={{ color: '#22c55e' }}>✓</span> {files[key].name}
+                      <div style={{ fontSize: '0.75rem', color: '#71717a', marginTop: '0.25rem' }}>
+                        {parsedData[key]?.rows?.length || 0} rows
+                      </div>
+                    </div>
+                  ) : (
+                    <div style={{ color: '#71717a' }}>
+                      Drop CSV or click to upload
+                    </div>
+                  )}
+                </label>
+              </div>
+            ))}
+            
+            <div style={{ gridColumn: '1 / -1', textAlign: 'center', marginTop: '1rem' }}>
+              <button
+                className="btn btn-primary"
+                onClick={performMerge}
+                disabled={!canMerge}
+              >
+                {canMerge ? 'Merge & Transform →' : 'Upload Bahr Dataset to Continue'}
+              </button>
+            </div>
+          </div>
+        )}
+        
+        {/* Preview Tab */}
+        {activeTab === 'preview' && (
+          <div className="card">
+            <h3 style={{ marginBottom: '1rem' }}>Parsed Data Preview</h3>
+            
+            {Object.entries(parsedData).map(([key, data]) => (
+              data?.rows?.length > 0 && (
+                <div key={key} style={{ marginBottom: '2rem' }}>
+                  <h4 style={{ fontSize: '0.875rem', color: '#a5b4fc', marginBottom: '0.5rem' }}>
+                    {key} ({data.rows.length} rows)
+                  </h4>
+                  <div className="table-container">
+                    <table>
+                      <thead>
+                        <tr>
+                          {data.headers.slice(0, 8).map((h, i) => (
+                            <th key={i}>{h}</th>
+                          ))}
+                          {data.headers.length > 8 && <th>...</th>}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {data.rows.slice(0, 5).map((row, i) => (
+                          <tr key={i}>
+                            {data.headers.slice(0, 8).map((h, j) => (
+                              <td key={j}>{String(row[h] || '').slice(0, 30)}</td>
+                            ))}
+                            {data.headers.length > 8 && <td>...</td>}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )
+            ))}
+            
+            {!Object.values(parsedData).some(d => d?.rows?.length > 0) && (
+              <p style={{ color: '#71717a', textAlign: 'center' }}>No data uploaded yet</p>
+            )}
+          </div>
+        )}
+        
+        {/* Results Tab */}
+        {activeTab === 'results' && mergeResult && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+            {/* Validation Report */}
+            <div className="card">
+              <h3 style={{ marginBottom: '1rem' }}>Validation Report</h3>
+              <div style={{ maxHeight: '200px', overflowY: 'auto' }}>
+                {validationReport.map((item, i) => (
+                  <div key={i} style={{ display: 'flex', gap: '0.5rem', marginBottom: '0.5rem', fontSize: '0.8rem' }}>
+                    <span className={`badge badge-${item.type}`}>{item.type}</span>
+                    <span>{item.message}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+            
+            {/* Download Buttons */}
+            <div className="card">
+              <h3 style={{ marginBottom: '1rem' }}>Download Outputs</h3>
+              <p style={{ fontSize: '0.8rem', color: '#71717a', marginBottom: '1rem' }}>
+                Import in order: 1) Clients → 2) Events → 3) Case Master → 4) Run Linking Script
+              </p>
+              
+              <div style={{ display: 'flex', gap: '1rem', flexWrap: 'wrap' }}>
+                <button
+                  className="btn btn-secondary"
+                  onClick={() => downloadCSV(
+                    mergeResult.clients,
+                    'clients_for_airtable.csv',
+                    ['First Name', 'Middle Name', 'Family Name', 'A#', 'Phone Number', 'Client Email', 'Address Line 1', 'Address Line 2', 'City', 'Zip (5)', 'Country', 'Entry Date', 'Place of Entry', 'DOB', '_import_key']
+                  )}
+                >
+                  1. Clients CSV ({mergeResult.clients.length})
+                </button>
+                
+                <button
+                  className="btn btn-secondary"
+                  onClick={() => downloadCSV(
+                    mergeResult.events,
+                    'events_for_airtable.csv',
+                    ['Hearing Date/Time', 'Event Type', 'Event Hearing Type', 'Court', 'Judge', 'Webex', 'Telephonic', '_client_A#', '_client_name', '_status', '_matter_id', '_riders']
+                  )}
+                >
+                  2. Events CSV ({mergeResult.events.length})
+                </button>
+                
+                <button
+                  className="btn btn-secondary"
+                  onClick={() => downloadCSV(
+                    mergeResult.matterNotes,
+                    'case_master_for_airtable.csv',
+                    ['Note details', 'Date/Time in PP', 'PP ID', '_client_A#', '_client_name', '_matter']
+                  )}
+                >
+                  3. Case Master CSV ({mergeResult.matterNotes.length})
+                </button>
+                
+                <button
+                  className="btn btn-primary"
+                  onClick={downloadScript}
+                >
+                  4. Linking Script (.js)
+                </button>
+              </div>
+            </div>
+            
+            {/* Preview Tables */}
+            <div className="card">
+              <h3 style={{ marginBottom: '1rem' }}>Clients Preview</h3>
+              <div className="table-container">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Name</th>
+                      <th>A#</th>
+                      <th>Phone</th>
+                      <th>Email</th>
+                      <th>City</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {mergeResult.clients.slice(0, 5).map((row, i) => (
+                      <tr key={i}>
+                        <td>{row['First Name']} {row['Family Name']}</td>
+                        <td>{row['A#']}</td>
+                        <td>{row['Phone Number']}</td>
+                        <td>{row['Client Email']}</td>
+                        <td>{row['City']}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+            
+            <div className="card">
+              <h3 style={{ marginBottom: '1rem' }}>Events Preview</h3>
+              <div className="table-container">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Date/Time</th>
+                      <th>Type</th>
+                      <th>Court</th>
+                      <th>Judge</th>
+                      <th>Client A#</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {mergeResult.events.slice(0, 5).map((row, i) => (
+                      <tr key={i}>
+                        <td>{row['Hearing Date/Time']}</td>
+                        <td>{row['Event Hearing Type']}</td>
+                        <td>{String(row['Court']).slice(0, 30)}</td>
+                        <td>{row['Judge']}</td>
+                        <td>{row['_client_A#']}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+            
+            {/* Linking Script Preview */}
+            <div className="card">
+              <h3 style={{ marginBottom: '1rem' }}>Linking Script Preview</h3>
+              <p style={{ fontSize: '0.8rem', color: '#71717a', marginBottom: '1rem' }}>
+                Run this in Airtable's Scripting Extension after importing all CSVs
+              </p>
+              <pre>{mergeResult.linkingScript}</pre>
+            </div>
+          </div>
+        )}
+        
+        {activeTab === 'results' && !mergeResult && (
+          <div className="card" style={{ textAlign: 'center', padding: '3rem' }}>
+            <p style={{ color: '#71717a' }}>Run the merge to see results</p>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
