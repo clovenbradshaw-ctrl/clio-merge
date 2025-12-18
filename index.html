@@ -341,6 +341,7 @@ function ClioAirtableMerger() {
         const hasTelephonic = (row['conferenceData.entryPoints.1.entryPointType'] || '') === 'phone';
 
         eventsOutput.push({
+          'A#': matchedClient?.aNumber || summaryParsed.aNumber || '',
           'Hearing Date/Time': startDateTime,
           'Event Type': 'Hearing',
           'Event Hearing Type': mapHearingType(summaryParsed.hearingType),
@@ -348,7 +349,6 @@ function ClioAirtableMerger() {
           'Judge': descParsed.judge,
           'Webex': hasWebex ? 'TRUE' : 'FALSE',
           'Telephonic': hasTelephonic ? 'TRUE' : 'FALSE',
-          '_client_A#': matchedClient?.aNumber || summaryParsed.aNumber || '',
           '_client_name': matchedClient ? `${matchedClient.lastName}, ${matchedClient.firstName}` : summaryParsed.clientName,
           '_status': summaryParsed.status,
           '_matter_id': summaryParsed.matterId,
@@ -438,9 +438,9 @@ ${note.detail || '(No content)'}`;
       }).join('\n\n');
 
       caseMasterOutput.push({
+        'A#': clientData.client.aNumber || '',
         'Case Notes': formattedNotes,
         'PP ID': clientData.matterId,
-        '_client_A#': clientData.client.aNumber || '',
         '_client_name': `${clientData.client.lastName}, ${clientData.client.firstName}`,
         '_matter': clientData.matter,
         '_note_count': sortedNotes.length,
@@ -500,12 +500,12 @@ for (const record of clientRecords.records) {
 console.log(\`Loaded \${aNumToRecordId.size} clients with A#\`);
 
 // Link Events to Clients
-const eventRecords = await eventsTable.selectRecordsAsync({ fields: ['_client_A#', 'Client'] });
+const eventRecords = await eventsTable.selectRecordsAsync({ fields: ['A#', 'Client'] });
 let linkedEvents = 0;
 let failedEvents = 0;
 
 for (const record of eventRecords.records) {
-  const aNum = record.getCellValueAsString('_client_A#');
+  const aNum = record.getCellValueAsString('A#');
   const existingClient = record.getCellValue('Client');
 
   if (aNum && !existingClient && aNumToRecordId.has(aNum)) {
@@ -522,12 +522,12 @@ for (const record of eventRecords.records) {
 console.log(\`Linked \${linkedEvents} events, \${failedEvents} failed\`);
 
 // Link Case Master View to Clients
-const caseRecords = await caseMasterTable.selectRecordsAsync({ fields: ['_client_A#', 'Contact'] });
+const caseRecords = await caseMasterTable.selectRecordsAsync({ fields: ['A#', 'Contact'] });
 let linkedCases = 0;
 let failedCases = 0;
 
 for (const record of caseRecords.records) {
-  const aNum = record.getCellValueAsString('_client_A#');
+  const aNum = record.getCellValueAsString('A#');
   const existingContact = record.getCellValue('Contact');
 
   if (aNum && !existingContact && aNumToRecordId.has(aNum)) {
@@ -542,7 +542,7 @@ for (const record of caseRecords.records) {
 }
 
 console.log(\`Linked \${linkedCases} case records, \${failedCases} failed\`);
-console.log('Done! You can now delete the _client_A# columns.');
+console.log('Done! The A# column serves as the universal UID across all tables.');
 `;
 
     setMergeResult({
@@ -872,7 +872,7 @@ console.log('Done! You can now delete the _client_A# columns.');
                   onClick={() => downloadCSV(
                     mergeResult.clients,
                     'clients_for_airtable.csv',
-                    ['First Name', 'Middle Name', 'Family Name', 'A#', 'Phone Number', 'Client Email', 'Address Line 1', 'Address Line 2', 'City', 'Zip (5)', 'Country', 'Entry Date', 'Place of Entry', 'DOB', '_import_key']
+                    ['A#', 'First Name', 'Middle Name', 'Family Name', 'Phone Number', 'Client Email', 'Address Line 1', 'Address Line 2', 'City', 'Zip (5)', 'Country', 'Entry Date', 'Place of Entry', 'DOB', '_import_key']
                   )}
                 >
                   1. Clients CSV ({mergeResult.clients.length})
@@ -883,7 +883,7 @@ console.log('Done! You can now delete the _client_A# columns.');
                   onClick={() => downloadCSV(
                     mergeResult.events,
                     'events_for_airtable.csv',
-                    ['Hearing Date/Time', 'Event Type', 'Event Hearing Type', 'Court', 'Judge', 'Webex', 'Telephonic', '_client_A#', '_client_name', '_status', '_matter_id', '_riders']
+                    ['A#', 'Hearing Date/Time', 'Event Type', 'Event Hearing Type', 'Court', 'Judge', 'Webex', 'Telephonic', '_client_name', '_status', '_matter_id', '_riders']
                   )}
                 >
                   2. Events CSV ({mergeResult.events.length})
@@ -894,7 +894,7 @@ console.log('Done! You can now delete the _client_A# columns.');
                   onClick={() => downloadCSV(
                     mergeResult.caseMaster,
                     'case_master_for_airtable.csv',
-                    ['Case Notes', 'PP ID', '_client_A#', '_client_name', '_matter', '_note_count']
+                    ['A#', 'Case Notes', 'PP ID', '_client_name', '_matter', '_note_count']
                   )}
                 >
                   3. Case Master CSV ({mergeResult.caseMaster.length} clients)
@@ -916,8 +916,8 @@ console.log('Done! You can now delete the _client_A# columns.');
                 <table>
                   <thead>
                     <tr>
-                      <th>Name</th>
                       <th>A#</th>
+                      <th>Name</th>
                       <th>Phone</th>
                       <th>Email</th>
                       <th>City</th>
@@ -926,8 +926,8 @@ console.log('Done! You can now delete the _client_A# columns.');
                   <tbody>
                     {mergeResult.clients.slice(0, 5).map((row, i) => (
                       <tr key={i}>
-                        <td>{row['First Name']} {row['Family Name']}</td>
                         <td>{row['A#']}</td>
+                        <td>{row['First Name']} {row['Family Name']}</td>
                         <td>{row['Phone Number']}</td>
                         <td>{row['Client Email']}</td>
                         <td>{row['City']}</td>
@@ -944,21 +944,21 @@ console.log('Done! You can now delete the _client_A# columns.');
                 <table>
                   <thead>
                     <tr>
+                      <th>A#</th>
                       <th>Date/Time</th>
                       <th>Type</th>
                       <th>Court</th>
                       <th>Judge</th>
-                      <th>Client A#</th>
                     </tr>
                   </thead>
                   <tbody>
                     {mergeResult.events.slice(0, 5).map((row, i) => (
                       <tr key={i}>
+                        <td>{row['A#']}</td>
                         <td>{row['Hearing Date/Time']}</td>
                         <td>{row['Event Hearing Type']}</td>
                         <td>{String(row['Court']).slice(0, 30)}</td>
                         <td>{row['Judge']}</td>
-                        <td>{row['_client_A#']}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -973,8 +973,8 @@ console.log('Done! You can now delete the _client_A# columns.');
                 <table>
                   <thead>
                     <tr>
-                      <th>Client</th>
                       <th>A#</th>
+                      <th>Client</th>
                       <th>Notes</th>
                       <th>Case Notes Preview</th>
                     </tr>
@@ -982,8 +982,8 @@ console.log('Done! You can now delete the _client_A# columns.');
                   <tbody>
                     {mergeResult.caseMaster.slice(0, 5).map((row, i) => (
                       <tr key={i}>
+                        <td>{row['A#']}</td>
                         <td>{row['_client_name']}</td>
-                        <td>{row['_client_A#']}</td>
                         <td>{row['_note_count']}</td>
                         <td style={{ maxWidth: '400px', whiteSpace: 'pre-wrap', fontSize: '0.7rem', fontFamily: 'monospace' }}>
                           {String(row['Case Notes']).slice(0, 300)}...
