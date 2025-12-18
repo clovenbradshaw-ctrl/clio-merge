@@ -100,16 +100,57 @@ const parseCSV = (text) => {
 };
 
 // Normalize A# to ###-###-### format
+// Returns { normalized, isValid, original, issue }
 const normalizeANumber = (aNum) => {
-  if (!aNum) return '';
+  if (!aNum || !aNum.trim()) {
+    return { normalized: '', isValid: false, original: aNum, issue: 'empty' };
+  }
+
   const digits = aNum.replace(/[^0-9]/g, '');
+
   if (digits.length === 9) {
-    return `${digits.slice(0, 3)}-${digits.slice(3, 6)}-${digits.slice(6, 9)}`;
+    return {
+      normalized: `${digits.slice(0, 3)}-${digits.slice(3, 6)}-${digits.slice(6, 9)}`,
+      isValid: true,
+      original: aNum,
+      issue: null
+    };
   }
+
   if (digits.length === 10 && digits[0] === '1') {
-    return `${digits.slice(1, 4)}-${digits.slice(4, 7)}-${digits.slice(7, 10)}`;
+    // Handle leading 1 (sometimes added as country code artifact)
+    return {
+      normalized: `${digits.slice(1, 4)}-${digits.slice(4, 7)}-${digits.slice(7, 10)}`,
+      isValid: true,
+      original: aNum,
+      issue: null
+    };
   }
-  return digits;
+
+  // Invalid digit count
+  return {
+    normalized: digits,
+    isValid: false,
+    original: aNum,
+    issue: `wrong-length-${digits.length}`
+  };
+};
+
+// Simple string version for backward compatibility
+const normalizeANumberSimple = (aNum) => {
+  const result = normalizeANumber(aNum);
+  return result.normalized;
+};
+
+// Generate fallback ID for clients without valid A#
+const generateFallbackId = (lastName, firstName, dob) => {
+  const cleanLast = (lastName || '').toUpperCase().replace(/[^A-Z]/g, '').slice(0, 10);
+  const cleanFirst = (firstName || '').toUpperCase().replace(/[^A-Z]/g, '').slice(0, 10);
+  const cleanDob = (dob || '').replace(/[^0-9]/g, '').slice(0, 8);
+
+  if (!cleanLast && !cleanFirst) return null;
+
+  return `PENDING-${cleanLast}-${cleanFirst}${cleanDob ? '-' + cleanDob : ''}`;
 };
 
 // Extract A# using multiple patterns (ordered by specificity)
@@ -264,7 +305,7 @@ const parseEventDescription = (desc) => {
   // Extract riders (format: RIDER: NAME|A-Number: ###-###-###)
   const riderMatches = desc.matchAll(/RIDER:\s*([^|]+)\|A-?Number:?\s*([\d-]+)/gi);
   for (const match of riderMatches) {
-    result.riders.push({ name: match[1].trim(), aNumber: normalizeANumber(match[2]) });
+    result.riders.push({ name: match[1].trim(), aNumber: normalizeANumberSimple(match[2]) });
   }
 
   // Extract judge - multiple patterns in order of specificity
@@ -394,24 +435,69 @@ function ClioAirtableMerger() {
 
     // Step 1: Build lookup from Bahr dataset (authority for A#)
     const bahrLookup = new Map(); // name -> record
-    const aNumberLookup = new Map(); // A# -> record
+    const aNumberLookup = new Map(); // A# -> record (valid A#s only)
+    const clientIdLookup = new Map(); // clientId (A# or fallback) -> record
+
+    // Track A# validation issues
+    let validANumbers = 0;
+    let invalidANumbers = 0;
+    let missingANumbers = 0;
+    const aNumberIssues = [];
 
     if (parsedData.bahr?.rows) {
       parsedData.bahr.rows.forEach((row, idx) => {
         const lastName = row['Last Name'] || '';
         const firstName = row['First Name'] || '';
         const middleName = row['Middle Name'] || '';
-        const aNumber = normalizeANumber(row['A number'] || '');
+        const dob = row['DOB'] || '';
+        const rawANumber = row['A number'] || '';
 
+        // Validate and normalize A#
+        const aNumberResult = normalizeANumber(rawANumber);
         const nameKey = normalizeName(lastName, firstName);
+
+        // Determine client ID (valid A# or fallback)
+        let clientId = '';
+        let aNumberStatus = '';
+
+        if (aNumberResult.isValid) {
+          clientId = aNumberResult.normalized;
+          aNumberStatus = 'valid';
+          validANumbers++;
+        } else if (aNumberResult.issue === 'empty') {
+          // No A# provided - generate fallback
+          clientId = generateFallbackId(lastName, firstName, dob) || `PENDING-ROW-${idx}`;
+          aNumberStatus = 'missing';
+          missingANumbers++;
+          aNumberIssues.push({
+            row: idx + 2, // +2 for header and 0-index
+            name: `${firstName} ${lastName}`,
+            issue: 'Missing A# - using fallback ID',
+            fallbackId: clientId
+          });
+        } else {
+          // Invalid A# format (wrong digit count)
+          clientId = generateFallbackId(lastName, firstName, dob) || `PENDING-ROW-${idx}`;
+          aNumberStatus = 'invalid';
+          invalidANumbers++;
+          aNumberIssues.push({
+            row: idx + 2,
+            name: `${firstName} ${lastName}`,
+            issue: `Invalid A#: "${rawANumber}" (${aNumberResult.issue})`,
+            fallbackId: clientId
+          });
+        }
 
         const record = {
           _source: 'bahr',
           _idx: idx,
+          _clientId: clientId,
+          _aNumberStatus: aNumberStatus,
+          _rawANumber: rawANumber,
           lastName,
           firstName,
           middleName,
-          aNumber,
+          aNumber: aNumberResult.isValid ? aNumberResult.normalized : '',
           phone: row['Telphone Number'] || '',
           email: row['Email'] || '',
           addressLine1: row['Street Number and Name'] || '',
@@ -422,17 +508,33 @@ function ClioAirtableMerger() {
           country: row['18.a. Country of Citizenship or Nationality'] || '',
           entryDate: row['22. Date of Last Arrival into United States'] || '',
           placeOfEntry: row['23. Place of Last Arrival to US'] || '',
-          dob: row['DOB'] || '',
+          dob: dob,
         };
 
         bahrLookup.set(nameKey, record);
-        if (aNumber) {
-          aNumberLookup.set(aNumber, record);
+        clientIdLookup.set(clientId, record);
+
+        // Only add to A# lookup if valid
+        if (aNumberResult.isValid) {
+          aNumberLookup.set(aNumberResult.normalized, record);
         }
       });
     }
 
+    // Report A# validation results
     reports.push({ type: 'info', message: `Loaded ${bahrLookup.size} clients from Bahr dataset` });
+    reports.push({
+      type: validANumbers === bahrLookup.size ? 'success' : 'warning',
+      message: `A# Validation: ${validANumbers} valid, ${invalidANumbers} malformed, ${missingANumbers} missing`
+    });
+
+    // Add individual A# issues to report
+    aNumberIssues.forEach(issue => {
+      reports.push({
+        type: 'error',
+        message: `Row ${issue.row} (${issue.name}): ${issue.issue} → ${issue.fallbackId}`
+      });
+    });
 
     // Step 2: Enrich with Clio Contacts (match by name)
     let contactMatches = 0;
@@ -510,7 +612,8 @@ function ClioAirtableMerger() {
         const court = location || descParsed.courtAddress || summaryParsed.court;
 
         eventsOutput.push({
-          'A#': matchedClient?.aNumber || summaryParsed.aNumber || '',
+          'Client ID': matchedClient?._clientId || eventANumber, // Link key (A# or fallback)
+          'A#': eventANumber, // A# from event (for reference)
           'Hearing Date/Time': startDateTime,
           'Event Type': 'Hearing',
           'Event Hearing Type': mapHearingType(summaryParsed.hearingType),
@@ -518,7 +621,6 @@ function ClioAirtableMerger() {
           'Judge': descParsed.judge,
           'Webex': hasWebex ? 'TRUE' : 'FALSE',
           'Telephonic': hasTelephonic ? 'TRUE' : 'FALSE',
-          'A#': eventANumber,
           '_client_name': matchedClient ? `${matchedClient.lastName}, ${matchedClient.firstName}` : summaryParsed.clientName,
           '_status': summaryParsed.status,
           '_matter_id': summaryParsed.matterId,
@@ -610,7 +712,8 @@ ${note.detail || '(No content)'}`;
       }).join('\n\n');
 
       caseMasterOutput.push({
-        'A#': clientData.client.aNumber || '',
+        'Client ID': clientData.client._clientId || clientData.client.aNumber || '', // Link key
+        'A#': clientData.client.aNumber || '', // Valid A# only
         'Case Notes': formattedNotes,
         'PP ID': clientData.matterId,
         '_client_name': `${clientData.client.lastName}, ${clientData.client.firstName}`,
@@ -631,10 +734,12 @@ ${note.detail || '(No content)'}`;
       }
 
       clientsOutput.push({
+        'Client ID': record._clientId, // Universal ID (A# or fallback)
+        'A#': record.aNumber, // Valid A# only (empty if pending)
+        'A# Status': record._aNumberStatus, // 'valid', 'invalid', or 'missing'
         'First Name': record.firstName,
         'Middle Name': record.middleName,
         'Family Name': record.lastName,
-        'A#': record.aNumber,
         'Phone Number': record.phone,
         'Client Email': record.email,
         'Address Line 1': record.addressLine1,
@@ -645,76 +750,87 @@ ${note.detail || '(No content)'}`;
         'Entry Date': record.entryDate,
         'Place of Entry': record.placeOfEntry,
         'DOB': record.dob,
-        '_import_key': normalizeName(record.lastName, record.firstName),
+        '_raw_a_number': record._rawANumber, // Original value from Bahr for debugging
       });
     });
 
     // Generate linking script
     const linkingScript = `
-// Airtable Scripting Extension - Link Records by A#
+// Airtable Scripting Extension - Link Records by Client ID
 // Run this AFTER importing all three CSVs
+//
+// Client ID = A# (XXX-XXX-XXX) for clients with valid A#
+//           = PENDING-LASTNAME-FIRSTNAME-DOB for clients without A#
+//
+// This allows linking even for clients awaiting A# assignment
 
 const clientsTable = base.getTable('Client Info');
 const eventsTable = base.getTable('Events');
 const caseMasterTable = base.getTable('Case Master View // Activities');
 
-// Build A# -> Record ID lookup from Client Info
-const clientRecords = await clientsTable.selectRecordsAsync({ fields: ['A#'] });
-const aNumToRecordId = new Map();
+// Build Client ID -> Record ID lookup from Client Info
+const clientRecords = await clientsTable.selectRecordsAsync({ fields: ['Client ID', 'A#', 'A# Status'] });
+const clientIdToRecordId = new Map();
+let pendingCount = 0;
 
 for (const record of clientRecords.records) {
-  const aNum = record.getCellValueAsString('A#');
-  if (aNum) {
-    aNumToRecordId.set(aNum, record.id);
+  const clientId = record.getCellValueAsString('Client ID');
+  const aNumStatus = record.getCellValueAsString('A# Status');
+
+  if (clientId) {
+    clientIdToRecordId.set(clientId, record.id);
+    if (aNumStatus !== 'valid') pendingCount++;
   }
 }
 
-console.log(\`Loaded \${aNumToRecordId.size} clients with A#\`);
+console.log(\`Loaded \${clientIdToRecordId.size} clients (\${pendingCount} with pending/invalid A#)\`);
 
-// Link Events to Clients
-const eventRecords = await eventsTable.selectRecordsAsync({ fields: ['A#', 'Client'] });
+// Link Events to Clients by Client ID
+const eventRecords = await eventsTable.selectRecordsAsync({ fields: ['Client ID', 'A#', 'Client'] });
 let linkedEvents = 0;
 let failedEvents = 0;
 
 for (const record of eventRecords.records) {
-  const aNum = record.getCellValueAsString('A#');
+  const clientId = record.getCellValueAsString('Client ID');
   const existingClient = record.getCellValue('Client');
 
-  if (aNum && !existingClient && aNumToRecordId.has(aNum)) {
+  if (clientId && !existingClient && clientIdToRecordId.has(clientId)) {
     await eventsTable.updateRecordAsync(record.id, {
-      'Client': [{ id: aNumToRecordId.get(aNum) }]
+      'Client': [{ id: clientIdToRecordId.get(clientId) }]
     });
     linkedEvents++;
-  } else if (aNum && !aNumToRecordId.has(aNum)) {
+  } else if (clientId && !clientIdToRecordId.has(clientId)) {
     failedEvents++;
-    console.log(\`No client found for A#: \${aNum}\`);
+    console.log(\`No client found for Client ID: \${clientId}\`);
   }
 }
 
 console.log(\`Linked \${linkedEvents} events, \${failedEvents} failed\`);
 
-// Link Case Master View to Clients
-const caseRecords = await caseMasterTable.selectRecordsAsync({ fields: ['A#', 'Contact'] });
+// Link Case Master View to Clients by Client ID
+const caseRecords = await caseMasterTable.selectRecordsAsync({ fields: ['Client ID', 'A#', 'Contact'] });
 let linkedCases = 0;
 let failedCases = 0;
 
 for (const record of caseRecords.records) {
-  const aNum = record.getCellValueAsString('A#');
+  const clientId = record.getCellValueAsString('Client ID');
   const existingContact = record.getCellValue('Contact');
 
-  if (aNum && !existingContact && aNumToRecordId.has(aNum)) {
+  if (clientId && !existingContact && clientIdToRecordId.has(clientId)) {
     await caseMasterTable.updateRecordAsync(record.id, {
-      'Contact': [{ id: aNumToRecordId.get(aNum) }]
+      'Contact': [{ id: clientIdToRecordId.get(clientId) }]
     });
     linkedCases++;
-  } else if (aNum && !aNumToRecordId.has(aNum)) {
+  } else if (clientId && !clientIdToRecordId.has(clientId)) {
     failedCases++;
-    console.log(\`No client found for A#: \${aNum}\`);
+    console.log(\`No client found for Client ID: \${clientId}\`);
   }
 }
 
 console.log(\`Linked \${linkedCases} case records, \${failedCases} failed\`);
-console.log('Done! The A# column serves as the universal UID across all tables.');
+console.log('Done!');
+console.log('NOTE: Clients with A# Status "missing" or "invalid" need A# lookup.');
+console.log('Once you have the A#, update the Client ID column to match.');
 `;
 
     setMergeResult({
@@ -854,6 +970,9 @@ console.log('Done! The A# column serves as the universal UID across all tables.'
         .badge-warning { background: rgba(245, 158, 11, 0.2); color: #fbbf24; }
         .badge-error { background: rgba(239, 68, 68, 0.2); color: #f87171; }
         .badge-success { background: rgba(34, 197, 94, 0.2); color: #4ade80; }
+        .badge-invalid { background: rgba(239, 68, 68, 0.2); color: #f87171; }
+        .badge-missing { background: rgba(245, 158, 11, 0.2); color: #fbbf24; }
+        .badge-valid { background: rgba(34, 197, 94, 0.2); color: #4ade80; }
 
         .table-container {
           overflow-x: auto;
@@ -1044,7 +1163,7 @@ console.log('Done! The A# column serves as the universal UID across all tables.'
                   onClick={() => downloadCSV(
                     mergeResult.clients,
                     'clients_for_airtable.csv',
-                    ['A#', 'First Name', 'Middle Name', 'Family Name', 'Phone Number', 'Client Email', 'Address Line 1', 'Address Line 2', 'City', 'Zip (5)', 'Country', 'Entry Date', 'Place of Entry', 'DOB', '_import_key']
+                    ['Client ID', 'A#', 'A# Status', 'First Name', 'Middle Name', 'Family Name', 'Phone Number', 'Client Email', 'Address Line 1', 'Address Line 2', 'City', 'Zip (5)', 'Country', 'Entry Date', 'Place of Entry', 'DOB', '_raw_a_number']
                   )}
                 >
                   1. Clients CSV ({mergeResult.clients.length})
@@ -1055,7 +1174,7 @@ console.log('Done! The A# column serves as the universal UID across all tables.'
                   onClick={() => downloadCSV(
                     mergeResult.events,
                     'events_for_airtable.csv',
-                    ['A#', 'Hearing Date/Time', 'Event Type', 'Event Hearing Type', 'Court', 'Judge', 'Webex', 'Telephonic', '_client_name', '_status', '_matter_id', '_riders']
+                    ['Client ID', 'A#', 'Hearing Date/Time', 'Event Type', 'Event Hearing Type', 'Court', 'Judge', 'Webex', 'Telephonic', '_client_name', '_status', '_matter_id', '_riders']
                   )}
                 >
                   2. Events CSV ({mergeResult.events.length})
@@ -1066,7 +1185,7 @@ console.log('Done! The A# column serves as the universal UID across all tables.'
                   onClick={() => downloadCSV(
                     mergeResult.caseMaster,
                     'case_master_for_airtable.csv',
-                    ['A#', 'Case Notes', 'PP ID', '_client_name', '_matter', '_note_count']
+                    ['Client ID', 'A#', 'Case Notes', 'PP ID', '_client_name', '_matter', '_note_count']
                   )}
                 >
                   3. Case Master CSV ({mergeResult.caseMaster.length} clients)
@@ -1088,21 +1207,25 @@ console.log('Done! The A# column serves as the universal UID across all tables.'
                 <table>
                   <thead>
                     <tr>
+                      <th>Client ID</th>
                       <th>A#</th>
+                      <th>Status</th>
                       <th>Name</th>
                       <th>Phone</th>
-                      <th>Email</th>
-                      <th>City</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {mergeResult.clients.slice(0, 5).map((row, i) => (
-                      <tr key={i}>
-                        <td>{row['A#']}</td>
+                    {mergeResult.clients.slice(0, 10).map((row, i) => (
+                      <tr key={i} style={{ background: row['A# Status'] !== 'valid' ? 'rgba(239, 68, 68, 0.1)' : 'transparent' }}>
+                        <td style={{ fontFamily: 'monospace', fontSize: '0.75rem' }}>{row['Client ID']}</td>
+                        <td>{row['A#'] || '—'}</td>
+                        <td>
+                          <span className={`badge badge-${row['A# Status'] === 'valid' ? 'success' : 'error'}`}>
+                            {row['A# Status']}
+                          </span>
+                        </td>
                         <td>{row['First Name']} {row['Family Name']}</td>
                         <td>{row['Phone Number']}</td>
-                        <td>{row['Client Email']}</td>
-                        <td>{row['City']}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -1116,21 +1239,21 @@ console.log('Done! The A# column serves as the universal UID across all tables.'
                 <table>
                   <thead>
                     <tr>
+                      <th>Client ID</th>
                       <th>A#</th>
                       <th>Date/Time</th>
                       <th>Type</th>
                       <th>Court</th>
-                      <th>Judge</th>
                     </tr>
                   </thead>
                   <tbody>
                     {mergeResult.events.slice(0, 5).map((row, i) => (
                       <tr key={i}>
+                        <td style={{ fontFamily: 'monospace', fontSize: '0.75rem' }}>{String(row['Client ID']).slice(0, 25)}</td>
                         <td>{row['A#']}</td>
                         <td>{row['Hearing Date/Time']}</td>
                         <td>{row['Event Hearing Type']}</td>
-                        <td>{String(row['Court']).slice(0, 30)}</td>
-                        <td>{row['Judge']}</td>
+                        <td>{String(row['Court']).slice(0, 25)}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -1145,21 +1268,19 @@ console.log('Done! The A# column serves as the universal UID across all tables.'
                 <table>
                   <thead>
                     <tr>
+                      <th>Client ID</th>
                       <th>A#</th>
                       <th>Client</th>
                       <th>Notes</th>
-                      <th>Case Notes Preview</th>
                     </tr>
                   </thead>
                   <tbody>
                     {mergeResult.caseMaster.slice(0, 5).map((row, i) => (
                       <tr key={i}>
-                        <td>{row['A#']}</td>
+                        <td style={{ fontFamily: 'monospace', fontSize: '0.75rem' }}>{String(row['Client ID']).slice(0, 25)}</td>
+                        <td>{row['A#'] || '—'}</td>
                         <td>{row['_client_name']}</td>
                         <td>{row['_note_count']}</td>
-                        <td style={{ maxWidth: '400px', whiteSpace: 'pre-wrap', fontSize: '0.7rem', fontFamily: 'monospace' }}>
-                          {String(row['Case Notes']).slice(0, 300)}...
-                        </td>
                       </tr>
                     ))}
                   </tbody>
