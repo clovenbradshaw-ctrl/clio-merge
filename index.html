@@ -13,45 +13,90 @@
   <script type="text/babel">
 const { useState, useCallback } = React;
 
-// CSV Parser utility
+// State-machine CSV Parser - handles multiline quoted fields correctly
 const parseCSV = (text) => {
-  const lines = text.split(/\r?\n/).filter(line => line.trim());
-  if (lines.length === 0) return { headers: [], rows: [] };
+  if (!text || !text.trim()) return { headers: [], rows: [] };
 
-  const parseRow = (row) => {
-    const result = [];
-    let current = '';
-    let inQuotes = false;
+  const rows = [];
+  let currentRow = [];
+  let currentField = '';
+  let inQuotes = false;
 
-    for (let i = 0; i < row.length; i++) {
-      const char = row[i];
-      if (char === '"') {
-        if (inQuotes && row[i + 1] === '"') {
-          current += '"';
-          i++;
-        } else {
-          inQuotes = !inQuotes;
-        }
-      } else if (char === ',' && !inQuotes) {
-        result.push(current.trim());
-        current = '';
+  // Character-by-character state machine
+  for (let i = 0; i < text.length; i++) {
+    const char = text[i];
+    const nextChar = text[i + 1];
+
+    if (inQuotes) {
+      // IN_QUOTES state
+      if (char === '"' && nextChar === '"') {
+        // Escaped quote "" -> single "
+        currentField += '"';
+        i++; // Skip next quote
+      } else if (char === '"') {
+        // Exit quotes
+        inQuotes = false;
       } else {
-        current += char;
+        // Append character (including newlines inside quotes)
+        currentField += char;
+      }
+    } else {
+      // NOT_IN_QUOTES state
+      if (char === '"') {
+        // Enter quotes
+        inQuotes = true;
+      } else if (char === ',') {
+        // End field, start new field
+        currentRow.push(currentField.trim());
+        currentField = '';
+      } else if (char === '\n' || (char === '\r' && nextChar === '\n')) {
+        // End field, end row
+        currentRow.push(currentField.trim());
+        currentField = '';
+
+        // Only add non-empty rows (at least one non-empty field)
+        if (currentRow.some(f => f !== '')) {
+          rows.push([...currentRow]);
+        }
+        currentRow = [];
+
+        // Skip \n in \r\n
+        if (char === '\r' && nextChar === '\n') {
+          i++;
+        }
+      } else if (char === '\r') {
+        // Standalone \r (old Mac format)
+        currentRow.push(currentField.trim());
+        currentField = '';
+        if (currentRow.some(f => f !== '')) {
+          rows.push([...currentRow]);
+        }
+        currentRow = [];
+      } else {
+        // Append regular character
+        currentField += char;
       }
     }
-    result.push(current.trim());
-    return result;
-  };
+  }
 
-  const headers = parseRow(lines[0]);
-  const rows = lines.slice(1).map(line => {
-    const values = parseRow(line);
+  // Handle final field/row (file may not end with newline)
+  if (currentField !== '' || currentRow.length > 0) {
+    currentRow.push(currentField.trim());
+    if (currentRow.some(f => f !== '')) {
+      rows.push(currentRow);
+    }
+  }
+
+  if (rows.length === 0) return { headers: [], rows: [] };
+
+  const headers = rows[0];
+  const dataRows = rows.slice(1).map(row => {
     const obj = {};
-    headers.forEach((h, i) => obj[h] = values[i] || '');
+    headers.forEach((h, i) => obj[h] = row[i] || '');
     return obj;
   });
 
-  return { headers, rows };
+  return { headers, rows: dataRows };
 };
 
 // Normalize A# to ###-###-### format
@@ -67,77 +112,195 @@ const normalizeANumber = (aNum) => {
   return digits;
 };
 
+// Extract A# using multiple patterns (ordered by specificity)
+const extractANumber = (text) => {
+  if (!text) return null;
+
+  const patterns = [
+    // |A-203-599-282 or |A203599282 (pipe delimiter format)
+    /\|A-?(\d{3})-?(\d{3})-?(\d{3})/i,
+    // A-Number: 213-645-057 or A-Number:213645057
+    /A-Number:?\s*(\d{3})-?(\d{3})-?(\d{3})/i,
+    // A# 123-456-789 or A#: 123456789
+    /A#\s*:?\s*(\d{3})-?(\d{3})-?(\d{3})/i,
+    // A-213-645-057 or A-213645057 (standalone A- prefix)
+    /\bA-(\d{3})-?(\d{3})-?(\d{3})\b/i,
+    // Raw 9 digits at word boundary (last resort)
+    /\b(\d{3})-?(\d{3})-?(\d{3})\b/,
+  ];
+
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    if (match) {
+      // Collect capture groups and normalize
+      const digits = match.slice(1).join('').replace(/\D/g, '');
+      if (digits.length === 9) {
+        return `${digits.slice(0, 3)}-${digits.slice(3, 6)}-${digits.slice(6, 9)}`;
+      }
+    }
+  }
+  return null; // No A# found
+};
+
 // Normalize name for matching
 const normalizeName = (lastName, firstName) => {
   const clean = (s) => (s || '').toUpperCase().trim().replace(/[^A-Z\s]/g, '');
   return `${clean(lastName)}|${clean(firstName)}`;
 };
 
-// Parse event summary to extract client info
+// Known hearing type keywords (in order of specificity)
+const HEARING_TYPE_KEYWORDS = ['MASTER', 'MCH', 'INDIVIDUAL', 'ICH', 'BOND', 'STATUS', 'CUSTODY', 'CALENDAR'];
+
+// Parse event summary using strip-and-extract approach
 const parseEventSummary = (summary) => {
-  if (!summary) return { hearingType: '', clientName: '', aNumber: '', status: '' };
+  if (!summary) return { hearingType: '', clientName: '', aNumber: null, status: '', court: '', matterId: '' };
 
-  // Pattern: "RESCHEDULED ARL-MASTER-MENDEZ ALVARADO, NORMA ELIZABETH|A-203-599-282 (00026-Mendez Alvarado)"
-  const result = { hearingType: '', clientName: '', aNumber: '', status: '', court: '', matterId: '' };
+  const result = { hearingType: '', clientName: '', aNumber: null, status: '', court: '', matterId: '' };
+  let working = summary;
 
-  // Extract status (RESCHEDULED, CANCELLED, etc.)
-  const statusMatch = summary.match(/^(RESCHEDULED|CANCELLED|CONFIRMED)\s+/i);
-  if (statusMatch) {
-    result.status = statusMatch[1].toUpperCase();
-    summary = summary.slice(statusMatch[0].length);
+  // Step 1: Extract A# first (required for matching)
+  result.aNumber = extractANumber(working);
+
+  // Remove A# and everything after it from working string for cleaner parsing
+  working = working
+    .replace(/\|A-?Number:?\s*\d{3}-?\d{3}-?\d{3}/gi, '')
+    .replace(/\|A-?\d{3}-?\d{3}-?\d{3}/gi, '')
+    .replace(/A-Number:?\s*\d{3}-?\d{3}-?\d{3}/gi, '')
+    .replace(/A#\s*:?\s*\d{3}-?\d{3}-?\d{3}/gi, '')
+    .replace(/\bA-\d{3}-?\d{3}-?\d{3}\b/gi, '');
+
+  // Step 2: Remove and extract ***...*** wrapper blocks
+  const starBlockMatches = working.match(/\*{2,}([^*]+)\*{2,}/g) || [];
+  for (const block of starBlockMatches) {
+    const content = block.replace(/\*+/g, '').trim().toUpperCase();
+    // Check if it's a status keyword
+    if (['COV APPROVED', 'RESCHEDULED', 'CANCELLED', 'CONFIRMED', 'POSTPONED'].some(s => content.includes(s))) {
+      if (content.includes('RESCHEDULED')) result.status = 'RESCHEDULED';
+      else if (content.includes('CANCELLED')) result.status = 'CANCELLED';
+      else if (content.includes('CONFIRMED')) result.status = 'CONFIRMED';
+      else if (content.includes('POSTPONED')) result.status = 'POSTPONED';
+    }
+  }
+  working = working.replace(/\*{2,}[^*]+\*{2,}/g, ' ').trim();
+
+  // Step 3: Extract status from start of string (if not already found in *** blocks)
+  if (!result.status) {
+    const statusMatch = working.match(/^(RESCHEDULED|CANCELLED|CONFIRMED|POSTPONED)\s+/i);
+    if (statusMatch) {
+      result.status = statusMatch[1].toUpperCase();
+      working = working.slice(statusMatch[0].length);
+    }
   }
 
-  // Extract court code and hearing type (e.g., "ARL-MASTER-")
-  const courtTypeMatch = summary.match(/^([A-Z]{2,4})-([A-Z]+)-/i);
-  if (courtTypeMatch) {
-    result.court = courtTypeMatch[1].toUpperCase();
-    result.hearingType = courtTypeMatch[2].toUpperCase();
-    summary = summary.slice(courtTypeMatch[0].length);
-  }
-
-  // Extract A# (pattern: |A-###-###-### or A-###-###-###)
-  const aNumMatch = summary.match(/\|?A-?(\d{3}-?\d{3}-?\d{3})/i);
-  if (aNumMatch) {
-    result.aNumber = normalizeANumber(aNumMatch[1]);
-  }
-
-  // Extract client name (before the | or A-)
-  const nameMatch = summary.match(/^([^|]+?)(?:\|A-|\s*\()/);
-  if (nameMatch) {
-    result.clientName = nameMatch[1].trim();
-  }
-
-  // Extract matter ID (in parentheses at end)
-  const matterMatch = summary.match(/\((\d+-[^)]+)\)/);
+  // Step 4: Extract matter ID (in parentheses like "00026-Mendez Alvarado")
+  const matterMatch = working.match(/\((\d{4,}-[^)]+)\)/);
   if (matterMatch) {
     result.matterId = matterMatch[1];
+    working = working.replace(matterMatch[0], '').trim();
+  }
+
+  // Step 5: Try XXX-TYPE-NAME pattern (e.g., ARL-MASTER-NAME or NEW ORLEANS, LA MASTER NAME)
+  // Pattern A: CODE-TYPE-NAME (hyphen separated)
+  const codeTypeNameMatch = working.match(/^([A-Z]{2,4})-([A-Z]+)-(.+)/i);
+  if (codeTypeNameMatch) {
+    result.court = codeTypeNameMatch[1].toUpperCase();
+    result.hearingType = codeTypeNameMatch[2].toUpperCase();
+    result.clientName = codeTypeNameMatch[3].trim().replace(/\s+/g, ' ');
+  } else {
+    // Pattern B: CITY, STATE TYPE NAME (space separated after city)
+    // e.g., "NEW ORLEANS, LA MASTER UTO-LOPEZ, REYNA ELIZABETH"
+    const cityTypeMatch = working.match(/^(.+?,\s*[A-Z]{2})\s+(MASTER|MCH|INDIVIDUAL|ICH|BOND|STATUS)\s+(.+)/i);
+    if (cityTypeMatch) {
+      result.court = cityTypeMatch[1].toUpperCase();
+      result.hearingType = cityTypeMatch[2].toUpperCase();
+      result.clientName = cityTypeMatch[3].trim().replace(/\s+/g, ' ');
+    } else {
+      // Pattern C: Just TYPE-NAME (no court prefix)
+      const typeNameMatch = working.match(/^(MASTER|MCH|INDIVIDUAL|ICH|BOND|STATUS)[-\s]+(.+)/i);
+      if (typeNameMatch) {
+        result.hearingType = typeNameMatch[1].toUpperCase();
+        result.clientName = typeNameMatch[2].trim().replace(/\s+/g, ' ');
+      } else {
+        // Fallback: look for hearing type anywhere and extract name before/after
+        for (const typeKw of HEARING_TYPE_KEYWORDS) {
+          const typeIdx = working.toUpperCase().indexOf(typeKw);
+          if (typeIdx >= 0) {
+            result.hearingType = typeKw;
+            const beforeType = working.slice(0, typeIdx).trim();
+            const afterType = working.slice(typeIdx + typeKw.length).trim().replace(/^[-\s]+/, '');
+
+            // Court is usually before the type
+            if (beforeType.length > 0 && beforeType.length < 30) {
+              result.court = beforeType.toUpperCase();
+            }
+            // Name is after the type
+            if (afterType.length > 0) {
+              result.clientName = afterType.replace(/\s+/g, ' ');
+            }
+            break;
+          }
+        }
+      }
+    }
+  }
+
+  // Clean up client name (remove trailing pipes, extra spaces, etc.)
+  if (result.clientName) {
+    result.clientName = result.clientName
+      .replace(/\|.*$/, '') // Remove everything after pipe
+      .replace(/\s+/g, ' ')
+      .trim();
   }
 
   return result;
 };
 
-// Parse event description to extract judge, riders
+// Parse event description to extract judge, riders, court address
 const parseEventDescription = (desc) => {
   if (!desc) return { judge: '', riders: [], courtAddress: '' };
 
   const result = { judge: '', riders: [], courtAddress: '' };
 
-  // Extract riders
-  const riderMatches = desc.matchAll(/RIDER:\s*([^|]+)\|A-Number:\s*([\d-]+)/gi);
+  // Extract riders (format: RIDER: NAME|A-Number: ###-###-###)
+  const riderMatches = desc.matchAll(/RIDER:\s*([^|]+)\|A-?Number:?\s*([\d-]+)/gi);
   for (const match of riderMatches) {
     result.riders.push({ name: match[1].trim(), aNumber: normalizeANumber(match[2]) });
   }
 
-  // Extract judge
-  const judgeMatch = desc.match(/JUDGE[:\s]+([^\n]+)/i);
-  if (judgeMatch) {
-    result.judge = judgeMatch[1].trim();
+  // Extract judge - multiple patterns in order of specificity
+  // Pattern 1: JUDGE on its own line, name on next line (multiline format)
+  const multilineJudgeMatch = desc.match(/JUDGE\s*\n\s*([A-Za-z][^\n]+)/i);
+  if (multilineJudgeMatch) {
+    result.judge = multilineJudgeMatch[1].trim();
+  } else {
+    // Pattern 2: JUDGE: Name or JUDGE Name (same line)
+    const inlineJudgeMatch = desc.match(/JUDGE[:\s]+([A-Za-z][^\n|]+)/i);
+    if (inlineJudgeMatch) {
+      // Clean up the judge name (stop at common delimiters)
+      let judgeName = inlineJudgeMatch[1].trim();
+      // Remove anything after COURT or ADDRESS or other section headers
+      judgeName = judgeName.replace(/\s*(COURT|ADDRESS|RIDER|WEBEX|TELEPHONIC).*$/i, '').trim();
+      result.judge = judgeName;
+    }
   }
 
-  // Extract court address
-  const addressMatch = desc.match(/COURT ADDRESS[:\s]+([^\n]+(?:\n[^\n]+)?)/i);
+  // Extract court address - can span multiple lines after "COURT ADDRESS"
+  const addressMatch = desc.match(/COURT\s*ADDRESS[:\s]*\n?([^]*?)(?=\n\s*(?:RIDER|WEBEX|TELEPHONIC|\n\n|$))/i);
   if (addressMatch) {
-    result.courtAddress = addressMatch[1].replace(/\n/g, ', ').trim();
+    // Join multiline address into single line
+    result.courtAddress = addressMatch[1]
+      .split('\n')
+      .map(line => line.trim())
+      .filter(line => line.length > 0)
+      .join(', ')
+      .replace(/,\s*,/g, ',')
+      .trim();
+  } else {
+    // Fallback: simpler pattern
+    const simpleAddressMatch = desc.match(/COURT\s*ADDRESS[:\s]+([^\n]+)/i);
+    if (simpleAddressMatch) {
+      result.courtAddress = simpleAddressMatch[1].trim();
+    }
   }
 
   return result;
@@ -301,7 +464,8 @@ function ClioAirtableMerger() {
     // Step 3: Parse Events
     const eventsOutput = [];
     let eventMatches = 0;
-    let eventMisses = 0;
+    let eventSkipped = 0;
+    let eventsWithoutDateTime = 0;
 
     if (parsedData.events?.rows) {
       parsedData.events.rows.forEach((row) => {
@@ -313,26 +477,28 @@ function ClioAirtableMerger() {
         const summaryParsed = parseEventSummary(summary);
         const descParsed = parseEventDescription(description);
 
-        // Try to match client by A# first, then by name
-        let matchedClient = null;
-        if (summaryParsed.aNumber && aNumberLookup.has(summaryParsed.aNumber)) {
-          matchedClient = aNumberLookup.get(summaryParsed.aNumber);
-          eventMatches++;
-        } else if (summaryParsed.clientName) {
-          // Try to parse "LASTNAME, FIRSTNAME" format
-          const nameParts = summaryParsed.clientName.split(',').map(s => s.trim());
-          if (nameParts.length >= 2) {
-            const nameKey = normalizeName(nameParts[0], nameParts[1]);
-            if (bahrLookup.has(nameKey)) {
-              matchedClient = bahrLookup.get(nameKey);
-              eventMatches++;
-            }
-          }
+        // CRITICAL: Skip events without A# (cannot be linked to clients)
+        const eventANumber = summaryParsed.aNumber;
+        if (!eventANumber) {
+          eventSkipped++;
+          reports.push({ type: 'warning', message: `Event SKIPPED (no A#): ${summary.slice(0, 60)}...` });
+          return; // Skip this row entirely
         }
 
-        if (!matchedClient) {
-          eventMisses++;
-          reports.push({ type: 'warning', message: `Event not matched: ${summary.slice(0, 60)}...` });
+        // Validate datetime exists
+        if (!startDateTime) {
+          eventsWithoutDateTime++;
+          reports.push({ type: 'warning', message: `Event missing datetime: ${summary.slice(0, 60)}...` });
+        }
+
+        // Try to match client by A# in Bahr dataset
+        let matchedClient = null;
+        if (aNumberLookup.has(eventANumber)) {
+          matchedClient = aNumberLookup.get(eventANumber);
+          eventMatches++;
+        } else {
+          // A# found in summary but not in Bahr dataset - still output for linking
+          reports.push({ type: 'info', message: `Event A# ${eventANumber} not in Bahr dataset (will import as new client)` });
         }
 
         // Check for conference data (Webex/Telephonic)
@@ -340,25 +506,31 @@ function ClioAirtableMerger() {
                         (row['conferenceData.entryPoints.0.uri'] || '').includes('webex');
         const hasTelephonic = (row['conferenceData.entryPoints.1.entryPointType'] || '') === 'phone';
 
+        // Use location field for court, fallback to parsed court code
+        const court = location || descParsed.courtAddress || summaryParsed.court;
+
         eventsOutput.push({
           'A#': matchedClient?.aNumber || summaryParsed.aNumber || '',
           'Hearing Date/Time': startDateTime,
           'Event Type': 'Hearing',
           'Event Hearing Type': mapHearingType(summaryParsed.hearingType),
-          'Court': location || summaryParsed.court,
+          'Court': court,
           'Judge': descParsed.judge,
           'Webex': hasWebex ? 'TRUE' : 'FALSE',
           'Telephonic': hasTelephonic ? 'TRUE' : 'FALSE',
+          'A#': eventANumber,
           '_client_name': matchedClient ? `${matchedClient.lastName}, ${matchedClient.firstName}` : summaryParsed.clientName,
           '_status': summaryParsed.status,
           '_matter_id': summaryParsed.matterId,
           '_riders': descParsed.riders.map(r => `${r.name}|${r.aNumber}`).join('; '),
-          '_original_summary': summary,
         });
       });
     }
 
-    reports.push({ type: 'info', message: `Processed ${eventsOutput.length} events, ${eventMatches} matched, ${eventMisses} unmatched` });
+    reports.push({
+      type: 'info',
+      message: `Events: ${eventsOutput.length} output, ${eventMatches} matched to Bahr, ${eventSkipped} skipped (no A#), ${eventsWithoutDateTime} missing datetime`
+    });
 
     // Step 4: Parse Matter Notes - Aggregate by client
     const notesByClient = new Map(); // A# -> array of notes
