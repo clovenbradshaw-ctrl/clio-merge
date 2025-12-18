@@ -360,16 +360,18 @@ function ClioAirtableMerger() {
 
     reports.push({ type: 'info', message: `Processed ${eventsOutput.length} events, ${eventMatches} matched, ${eventMisses} unmatched` });
 
-    // Step 4: Parse Matter Notes
-    const matterNotesOutput = [];
+    // Step 4: Parse Matter Notes - Aggregate by client
+    const notesByClient = new Map(); // A# -> array of notes
     let noteMatches = 0;
     let noteMisses = 0;
 
     if (parsedData.matterNotes?.rows) {
       parsedData.matterNotes.rows.forEach((row) => {
         const matter = row['Matter'] || '';
+        const subject = row['Subject'] || '';
         const detail = row['Detail'] || '';
         const date = row['Date'] || row['CreatedAt'] || '';
+        const creator = row['Creator'] || '';
         const matterId = row['MatterId'] || '';
 
         const matterParsed = parseMatterField(matter);
@@ -380,7 +382,6 @@ function ClioAirtableMerger() {
           if (nameKey.startsWith(matterParsed.lastName + '|') ||
               nameKey.includes(matterParsed.lastName)) {
             matchedClient = record;
-            noteMatches++;
             break;
           }
         }
@@ -388,20 +389,65 @@ function ClioAirtableMerger() {
         if (!matchedClient) {
           noteMisses++;
           reports.push({ type: 'warning', message: `Matter note not matched: ${matter}` });
+          return; // Skip unmatched notes
         }
 
-        matterNotesOutput.push({
-          'Note details': detail,
-          'Date/Time in PP': date,
-          'PP ID': matterId,
-          '_client_A#': matchedClient?.aNumber || '',
-          '_client_name': matchedClient ? `${matchedClient.lastName}, ${matchedClient.firstName}` : matter,
-          '_matter': matter,
+        noteMatches++;
+        const clientKey = matchedClient.aNumber || `NAME:${matchedClient.lastName}|${matchedClient.firstName}`;
+
+        if (!notesByClient.has(clientKey)) {
+          notesByClient.set(clientKey, {
+            client: matchedClient,
+            matterId: matterId,
+            matter: matter,
+            notes: []
+          });
+        }
+
+        notesByClient.get(clientKey).notes.push({
+          date: date,
+          subject: subject,
+          creator: creator,
+          detail: detail,
         });
       });
     }
 
-    reports.push({ type: 'info', message: `Processed ${matterNotesOutput.length} notes, ${noteMatches} matched, ${noteMisses} unmatched` });
+    // Format aggregated notes for each client (newest first)
+    const caseMasterOutput = [];
+
+    notesByClient.forEach((clientData, clientKey) => {
+      // Sort notes by date descending (newest first)
+      const sortedNotes = clientData.notes.sort((a, b) => {
+        const dateA = new Date(a.date || 0);
+        const dateB = new Date(b.date || 0);
+        return dateB - dateA; // Descending
+      });
+
+      // Format notes into a single text block
+      const formattedNotes = sortedNotes.map((note, idx) => {
+        const datePart = note.date ? `[${note.date}]` : '[No Date]';
+        const subjectPart = note.subject ? ` - ${note.subject}` : '';
+        const creatorPart = note.creator ? `\nBy: ${note.creator}` : '';
+        const separator = '─'.repeat(50);
+
+        return `${'═'.repeat(55)}
+${datePart}${subjectPart}${creatorPart}
+${separator}
+${note.detail || '(No content)'}`;
+      }).join('\n\n');
+
+      caseMasterOutput.push({
+        'Case Notes': formattedNotes,
+        'PP ID': clientData.matterId,
+        '_client_A#': clientData.client.aNumber || '',
+        '_client_name': `${clientData.client.lastName}, ${clientData.client.firstName}`,
+        '_matter': clientData.matter,
+        '_note_count': sortedNotes.length,
+      });
+    });
+
+    reports.push({ type: 'info', message: `Aggregated ${noteMatches} notes into ${caseMasterOutput.length} case records, ${noteMisses} notes unmatched` });
 
     // Step 5: Build Client Info output
     const clientsOutput = [];
@@ -502,7 +548,7 @@ console.log('Done! You can now delete the _client_A# columns.');
     setMergeResult({
       clients: clientsOutput,
       events: eventsOutput,
-      matterNotes: matterNotesOutput,
+      caseMaster: caseMasterOutput,
       linkingScript,
     });
 
@@ -846,12 +892,12 @@ console.log('Done! You can now delete the _client_A# columns.');
                 <button
                   className="btn btn-secondary"
                   onClick={() => downloadCSV(
-                    mergeResult.matterNotes,
+                    mergeResult.caseMaster,
                     'case_master_for_airtable.csv',
-                    ['Note details', 'Date/Time in PP', 'PP ID', '_client_A#', '_client_name', '_matter']
+                    ['Case Notes', 'PP ID', '_client_A#', '_client_name', '_matter', '_note_count']
                   )}
                 >
-                  3. Case Master CSV ({mergeResult.matterNotes.length})
+                  3. Case Master CSV ({mergeResult.caseMaster.length} clients)
                 </button>
 
                 <button
@@ -913,6 +959,35 @@ console.log('Done! You can now delete the _client_A# columns.');
                         <td>{String(row['Court']).slice(0, 30)}</td>
                         <td>{row['Judge']}</td>
                         <td>{row['_client_A#']}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            {/* Case Master Preview */}
+            <div className="card">
+              <h3 style={{ marginBottom: '1rem' }}>Case Master Preview (1 record per client)</h3>
+              <div className="table-container">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Client</th>
+                      <th>A#</th>
+                      <th>Notes</th>
+                      <th>Case Notes Preview</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {mergeResult.caseMaster.slice(0, 5).map((row, i) => (
+                      <tr key={i}>
+                        <td>{row['_client_name']}</td>
+                        <td>{row['_client_A#']}</td>
+                        <td>{row['_note_count']}</td>
+                        <td style={{ maxWidth: '400px', whiteSpace: 'pre-wrap', fontSize: '0.7rem', fontFamily: 'monospace' }}>
+                          {String(row['Case Notes']).slice(0, 300)}...
+                        </td>
                       </tr>
                     ))}
                   </tbody>
