@@ -758,12 +758,12 @@ function ClioAirtableMerger() {
       let offset = null;
 
       do {
-        const params = new URLSearchParams();
-        ['A#', 'clio_contact_id', 'Client ID', 'First Name', 'Family Name'].forEach(f => params.append('fields[]', f));
-        if (offset) params.append('offset', offset);
+        const url = offset
+          ? `https://api.airtable.com/v0/${devToolsBaseId}/Client%20Info?offset=${offset}`
+          : `https://api.airtable.com/v0/${devToolsBaseId}/Client%20Info`;
 
         const response = await fetch(
-          `https://api.airtable.com/v0/${devToolsBaseId}/Client%20Info?${params.toString()}`,
+          url,
           { headers: { 'Authorization': `Bearer ${airtableApiKey}` } }
         );
 
