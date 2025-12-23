@@ -864,15 +864,56 @@ function ClioAirtableMerger() {
         // Process each sheet
         workbook.SheetNames.forEach(sheetName => {
           const worksheet = workbook.Sheets[sheetName];
-          const rawJsonData = XLSX.utils.sheet_to_json(worksheet, { defval: '' });
 
-          if (rawJsonData.length === 0) {
+          // Read as raw 2D array first to have full control over header detection
+          const rawRows = XLSX.utils.sheet_to_json(worksheet, { header: 1, defval: '' });
+
+          if (rawRows.length === 0) {
             reports.push({ type: 'warning', message: `Sheet "${sheetName}": empty, skipped` });
             return;
           }
 
-          // Find real header row (handles "Column 1", "Column 2" etc)
-          const { headerRow, data: jsonData, detectedHeaders } = findHeaderRow(rawJsonData);
+          // Find the header row by scanning for recognizable column names
+          let headerRowIdx = 0;
+          for (let i = 0; i < Math.min(rawRows.length, 15); i++) {
+            const row = rawRows[i];
+            if (!row || row.length === 0) continue;
+
+            const rowValues = row.map(v => String(v || '').trim());
+            if (rowLooksLikeHeaders(rowValues)) {
+              headerRowIdx = i;
+              break;
+            }
+          }
+
+          // Build JSON data using detected header row
+          const headerValues = rawRows[headerRowIdx].map(v => String(v || '').trim());
+          const jsonData = [];
+
+          for (let i = headerRowIdx + 1; i < rawRows.length; i++) {
+            const row = rawRows[i];
+            if (!row || row.length === 0) continue;
+
+            const rowObj = {};
+            let hasData = false;
+
+            headerValues.forEach((header, idx) => {
+              if (header && row[idx] !== undefined && row[idx] !== null) {
+                const val = String(row[idx]).trim();
+                if (val !== '') {
+                  rowObj[header] = val;
+                  hasData = true;
+                }
+              }
+            });
+
+            if (hasData) {
+              jsonData.push(rowObj);
+            }
+          }
+
+          const headerRow = headerRowIdx;
+          const detectedHeaders = headerValues.filter(h => h !== '');
 
           if (jsonData.length === 0) {
             reports.push({ type: 'warning', message: `Sheet "${sheetName}": no data after header detection, skipped` });
