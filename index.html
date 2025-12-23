@@ -1014,27 +1014,29 @@ function ClioAirtableMerger() {
     return output;
   };
 
-  // Download flattened data as CSV
+  // Download client data as JSON with records organized by sheet/tab name
   const downloadBahrFlattenedCSV = () => {
-    const flatData = generateBahrFlattenedOutput();
-    const headers = ['Client Name', 'A#', 'Sheet', 'Row', 'Field', 'Value'];
-    const rows = flatData
-      .filter(row => row.type === 'data')
-      .map(row => ({
-        'Client Name': row.clientName,
-        'A#': row.aNumber,
-        'Sheet': row.sheetName,
-        'Row': row.rowIndex,
-        'Field': row.fieldName,
-        'Value': row.fieldValue,
-      }));
+    const clientsJson = bahrMergedClients.map(client => {
+      const clientObj = {
+        clientName: client.primaryName,
+        aNumber: client.aNumber || '',
+        allNames: client.names,
+      };
 
-    const csv = generateCSV(headers, rows);
-    const blob = new Blob([csv], { type: 'text/csv' });
+      // Add records for each sheet, using sheet name as the key
+      Object.entries(client.sheetData).forEach(([sheetName, records]) => {
+        clientObj[sheetName] = records.map(record => record.data);
+      });
+
+      return clientObj;
+    });
+
+    const json = JSON.stringify(clientsJson, null, 2);
+    const blob = new Blob([json], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = 'bahr_flattened_data.csv';
+    a.download = 'bahr_client_data.json';
     a.click();
     URL.revokeObjectURL(url);
   };
@@ -1705,7 +1707,7 @@ function ClioAirtableMerger() {
                     Download Client Summary ({bahrMergedClients.length} clients)
                   </button>
                   <button className="btn btn-secondary" onClick={downloadBahrFlattenedCSV}>
-                    Download Flattened Data (all fields)
+                    Download Client Data (JSON)
                   </button>
                 </div>
               )}
