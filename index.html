@@ -1554,9 +1554,23 @@ function ClioAirtableMerger() {
             record.country = row['Home Country/Region'] || row['Business Country/Region'] || row['Billing Country/Region'] || row['Other Country/Region'] || '';
           }
 
-          // DOB enrichment from Clio Birthday field
+          // DOB enrichment from Clio Birthday field - normalize to YYYY-MM-DD for Airtable
           if (!record.dob && row['Birthday']) {
-            record.dob = row['Birthday'];
+            const rawDob = row['Birthday'];
+            const date = new Date(rawDob);
+            if (!isNaN(date.getTime())) {
+              record.dob = date.toISOString().split('T')[0]; // YYYY-MM-DD
+            } else {
+              // Try MM/DD/YYYY format
+              const parts = rawDob.split('/');
+              if (parts.length === 3) {
+                const [m, d, y] = parts;
+                const year = y.length === 2 ? (parseInt(y) > 50 ? '19' + y : '20' + y) : y;
+                record.dob = `${year}-${m.padStart(2, '0')}-${d.padStart(2, '0')}`;
+              } else {
+                record.dob = rawDob; // Use as-is if can't parse
+              }
+            }
           }
 
           record.clioContactId = row['UniqueId'] || '';
