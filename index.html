@@ -1600,7 +1600,22 @@ function ClioAirtableMerger() {
               {/* Schema Display */}
               {devToolsSchema && devToolsTableName && (
                 <div style={{ marginBottom: '1.5rem' }}>
-                  <h4 style={{ marginBottom: '0.5rem' }}>Table Schema: {devToolsTableName}</h4>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
+                    <h4 style={{ margin: 0 }}>Table Schema: {devToolsTableName}</h4>
+                    <button
+                      className="btn btn-secondary"
+                      style={{ fontSize: '0.75rem', padding: '0.25rem 0.5rem' }}
+                      onClick={() => {
+                        const fields = devToolsTables.find(t => t.name === devToolsTableName)?.fields || [];
+                        const simplified = fields.map(f => ({ name: f.name, type: f.type }));
+                        const json = JSON.stringify(simplified, null, 2);
+                        navigator.clipboard.writeText(json);
+                        alert('Schema JSON copied to clipboard!');
+                      }}
+                    >
+                      Copy JSON
+                    </button>
+                  </div>
                   <div style={{ maxHeight: '300px', overflowY: 'auto', background: 'rgba(0, 0, 0, 0.3)', borderRadius: '8px', padding: '1rem' }}>
                     <table style={{ width: '100%', fontSize: '0.8rem' }}>
                       <thead>
