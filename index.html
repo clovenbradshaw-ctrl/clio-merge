@@ -607,6 +607,12 @@ function ClioAirtableMerger() {
   const [bahrSelectedClient, setBahrSelectedClient] = useState(null);
   const [bahrSearchTerm, setBahrSearchTerm] = useState('');
 
+  // Second Excel file state (Office CASES)
+  const [officeCasesFile, setOfficeCasesFile] = useState(null);
+  const [officeCasesSheets, setOfficeCasesSheets] = useState([]);
+  const [officeCasesRecords, setOfficeCasesRecords] = useState([]);
+  const [officeCasesParseReport, setOfficeCasesParseReport] = useState([]);
+
   // Phase 1 state
   const [phase1Files, setPhase1Files] = useState({ bahr: null, clioContacts: null });
   const [phase1Data, setPhase1Data] = useState({ bahr: null, clioContacts: null });
@@ -978,11 +984,152 @@ function ClioAirtableMerger() {
     reader.readAsArrayBuffer(file);
   };
 
+  // Handle Office CASES Excel file upload (second source)
+  const handleOfficeCasesUpload = (event) => {
+    const file = event.target.files[0];
+    if (!file) return;
+
+    setOfficeCasesFile(file);
+    setOfficeCasesSheets([]);
+    setOfficeCasesRecords([]);
+    setOfficeCasesParseReport([]);
+
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        const data = new Uint8Array(e.target.result);
+        const workbook = XLSX.read(data, { type: 'array' });
+
+        const reports = [];
+        const allSheets = [];
+        const allClientRecords = [];
+
+        reports.push({ type: 'info', message: `Loaded Office CASES workbook with ${workbook.SheetNames.length} sheets` });
+
+        // Process each sheet (same logic as BAHR)
+        workbook.SheetNames.forEach(sheetName => {
+          const worksheet = workbook.Sheets[sheetName];
+          const rawRows = XLSX.utils.sheet_to_json(worksheet, { header: 1, defval: '' });
+
+          if (rawRows.length === 0) {
+            reports.push({ type: 'warning', message: `Sheet "${sheetName}": empty, skipped` });
+            return;
+          }
+
+          // Find the header row by scanning for recognizable column names
+          let headerRowIdx = 0;
+          for (let i = 0; i < Math.min(rawRows.length, 15); i++) {
+            const row = rawRows[i];
+            if (!row || row.length === 0) continue;
+
+            const rowValues = row.map(v => String(v || '').trim());
+            if (rowLooksLikeHeaders(rowValues)) {
+              headerRowIdx = i;
+              break;
+            }
+          }
+
+          // Build JSON data using detected header row
+          const headerValues = rawRows[headerRowIdx].map(v => String(v || '').trim());
+          const jsonData = [];
+
+          for (let i = headerRowIdx + 1; i < rawRows.length; i++) {
+            const row = rawRows[i];
+            if (!row || row.length === 0) continue;
+
+            const rowObj = {};
+            let hasData = false;
+
+            headerValues.forEach((header, idx) => {
+              if (header && row[idx] !== undefined && row[idx] !== null) {
+                const val = String(row[idx]).trim();
+                if (val !== '') {
+                  rowObj[header] = val;
+                  hasData = true;
+                }
+              }
+            });
+
+            if (hasData) {
+              jsonData.push(rowObj);
+            }
+          }
+
+          const headerRow = headerRowIdx;
+          const detectedHeaders = headerValues.filter(h => h !== '');
+
+          if (jsonData.length === 0) {
+            reports.push({ type: 'warning', message: `Sheet "${sheetName}": no data after header detection, skipped` });
+            return;
+          }
+
+          const headers = detectedHeaders || Object.keys(jsonData[0] || {});
+
+          allSheets.push({
+            name: sheetName,
+            rowCount: jsonData.length,
+            headers,
+            data: jsonData,
+            headerRowOffset: headerRow,
+          });
+
+          // Extract clients from this sheet - prefix sheet name with source file
+          const clientsFromSheet = parseSheetForClients(jsonData, `[Office CASES] ${sheetName}`, headerRow);
+          allClientRecords.push(...clientsFromSheet);
+
+          const headerNote = headerRow > 0 ? ` (headers in row ${headerRow + 1})` : '';
+
+          if (clientsFromSheet.length === 0 && jsonData.length > 0) {
+            const sampleHeaders = headers.slice(0, 8).join(', ');
+            reports.push({
+              type: 'warning',
+              message: `Sheet "${sheetName}": ${jsonData.length} rows, 0 clients found${headerNote}. Headers: [${sampleHeaders}...]`
+            });
+          } else {
+            reports.push({
+              type: 'success',
+              message: `Sheet "${sheetName}": ${jsonData.length} rows, ${clientsFromSheet.length} clients found${headerNote}`
+            });
+          }
+        });
+
+        setOfficeCasesSheets(allSheets);
+        setOfficeCasesRecords(allClientRecords);
+        setOfficeCasesParseReport(reports);
+
+      } catch (err) {
+        setOfficeCasesParseReport([{ type: 'error', message: `Failed to parse Office CASES Excel: ${err.message}` }]);
+      }
+    };
+    reader.readAsArrayBuffer(file);
+  };
+
+  // Combine and merge clients from both Excel files
+  const combinedMergedClients = React.useMemo(() => {
+    // Start with BAHR records - we need the raw records, not merged ones
+    // So we need to rebuild from bahrSheets
+    const allRecords = [];
+
+    // Extract records from BAHR sheets
+    bahrSheets.forEach(sheet => {
+      const clientsFromSheet = parseSheetForClients(sheet.data, `[BAHR] ${sheet.name}`, sheet.headerRowOffset);
+      allRecords.push(...clientsFromSheet);
+    });
+
+    // Add Office CASES records (already have source prefix)
+    allRecords.push(...officeCasesRecords);
+
+    if (allRecords.length === 0) return [];
+
+    // Merge all records together
+    return mergeClientRecords(allRecords);
+  }, [bahrSheets, officeCasesRecords]);
+
   // Generate flattened output for export
   const generateBahrFlattenedOutput = () => {
     const output = [];
 
-    bahrMergedClients.forEach(client => {
+    combinedMergedClients.forEach(client => {
       // Add client header row
       output.push({
         type: 'client',
@@ -1020,7 +1167,7 @@ function ClioAirtableMerger() {
 
   // Download client data as JSON with records organized by sheet/tab name
   const downloadBahrFlattenedCSV = () => {
-    const clientsJson = bahrMergedClients.map(client => {
+    const clientsJson = combinedMergedClients.map(client => {
       const clientObj = {
         clientName: client.primaryName,
         aNumber: client.aNumber || '',
@@ -1040,7 +1187,7 @@ function ClioAirtableMerger() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = 'bahr_client_data.json';
+    a.download = 'combined_client_data.json';
     a.style.display = 'none';
     document.body.appendChild(a);
     a.click();
@@ -1051,7 +1198,7 @@ function ClioAirtableMerger() {
   // Download client summary as CSV
   const downloadBahrClientSummary = () => {
     const headers = ['Client Name', 'A#', 'Sheets Found In', 'Record Count', 'All Name Variants'];
-    const rows = bahrMergedClients.map(client => ({
+    const rows = combinedMergedClients.map(client => ({
       'Client Name': client.primaryName,
       'A#': client.aNumber || '',
       'Sheets Found In': Object.keys(client.sheetData).join('; '),
@@ -1064,7 +1211,7 @@ function ClioAirtableMerger() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = 'bahr_client_summary.csv';
+    a.download = 'combined_client_summary.csv';
     a.style.display = 'none';
     document.body.appendChild(a);
     a.click();
@@ -1119,17 +1266,17 @@ function ClioAirtableMerger() {
     let invalidANumbers = 0;
     let missingANumbers = 0;
 
-    if (bahrMergedClients.length === 0) {
-      reports.push({ type: 'warning', message: 'No clients loaded from Phase 0. Please parse the BAHR Excel file first.' });
+    if (combinedMergedClients.length === 0) {
+      reports.push({ type: 'warning', message: 'No clients loaded from Phase 0. Please upload and parse Excel files first.' });
       setPhase1Result(null);
       setPhase1Report(reports);
       return;
     }
 
-    reports.push({ type: 'info', message: `Processing ${bahrMergedClients.length} clients from Phase 0 data` });
+    reports.push({ type: 'info', message: `Processing ${combinedMergedClients.length} clients from Phase 0 data (combined from all Excel files)` });
 
-    // Build client records from bahrMergedClients
-    bahrMergedClients.forEach((client, idx) => {
+    // Build client records from combinedMergedClients
+    combinedMergedClients.forEach((client, idx) => {
       // Parse name from primaryName (usually "Last, First" or "First Last")
       let firstName = '';
       let lastName = '';
@@ -1280,7 +1427,7 @@ function ClioAirtableMerger() {
       }
     });
 
-    const uniqueClientCount = bahrMergedClients.length;
+    const uniqueClientCount = combinedMergedClients.length;
     reports.push({ type: 'info', message: `Built ${uniqueClientCount} client records from Phase 0 data (${bahrLookup.size} lookup keys)` });
     reports.push({
       type: validANumbers === uniqueClientCount ? 'success' : 'warning',
@@ -1447,7 +1594,7 @@ function ClioAirtableMerger() {
 
     setPhase1Result({ clients: clientsOutput });
     setPhase1Report(reports);
-  }, [phase1Data, bahrMergedClients]);
+  }, [phase1Data, combinedMergedClients]);
 
   // Phase 2: Case Master Views
   const runPhase2 = useCallback(() => {
@@ -1885,64 +2032,129 @@ function ClioAirtableMerger() {
 
         {/* Phase Content */}
         <div className="card" style={{ borderTopLeftRadius: 0 }}>
-          {/* Phase 0: Bahr Excel Parser */}
+          {/* Phase 0: Excel Parser (Both Files) */}
           {activePhase === 0 && (
             <div>
-              <h2 style={{ marginBottom: '1rem', fontSize: '1.25rem' }}>Bahr Excel Parser</h2>
+              <h2 style={{ marginBottom: '1rem', fontSize: '1.25rem' }}>Excel Data Parser</h2>
               <p style={{ color: '#71717a', marginBottom: '1.5rem', fontSize: '0.875rem' }}>
-                Upload the Bahr Excel workbook to extract and merge client data across all tabs.
-                Clients are matched by A# (primary) or normalized name (fallback).
+                Upload both Excel workbooks to extract and merge client data across all tabs.
+                Clients are matched by A# (primary) or normalized name (fallback) and combined into a single flat-packed record per unique client.
               </p>
 
-              {/* Excel Upload */}
-              <div style={{ marginBottom: '1.5rem' }}>
-                <h4 style={{ fontSize: '0.875rem', marginBottom: '0.5rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                  Bahr Workbook
-                  <span className="badge badge-warning">Excel .xlsx</span>
-                </h4>
-                <label className={`upload-zone ${bahrExcelFile ? 'has-file' : ''}`}>
-                  <input
-                    type="file"
-                    accept=".xlsx,.xls"
-                    onChange={handleBahrExcelUpload}
-                    style={{ display: 'none' }}
-                  />
-                  {bahrExcelFile ? (
-                    <div>
-                      <span style={{ color: '#22c55e' }}>✓</span> {bahrExcelFile.name}
-                      <div style={{ fontSize: '0.75rem', color: '#71717a' }}>
-                        {bahrSheets.length} sheets, {bahrMergedClients.length} unique clients
+              {/* Excel Uploads - Side by Side */}
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '1rem', marginBottom: '1.5rem' }}>
+                {/* BAHR Workbook Upload */}
+                <div>
+                  <h4 style={{ fontSize: '0.875rem', marginBottom: '0.5rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                    BAHR Workbook
+                    <span className="badge badge-warning">Excel .xlsx</span>
+                  </h4>
+                  <label className={`upload-zone ${bahrExcelFile ? 'has-file' : ''}`}>
+                    <input
+                      type="file"
+                      accept=".xlsx,.xls"
+                      onChange={handleBahrExcelUpload}
+                      style={{ display: 'none' }}
+                    />
+                    {bahrExcelFile ? (
+                      <div>
+                        <span style={{ color: '#22c55e' }}>✓</span> {bahrExcelFile.name}
+                        <div style={{ fontSize: '0.75rem', color: '#71717a' }}>
+                          {bahrSheets.length} sheets
+                        </div>
                       </div>
-                    </div>
-                  ) : (
-                    <div style={{ color: '#71717a' }}>Drop Excel file or click to upload</div>
-                  )}
-                </label>
+                    ) : (
+                      <div style={{ color: '#71717a' }}>Drop Excel file or click to upload</div>
+                    )}
+                  </label>
+                </div>
+
+                {/* Office CASES Workbook Upload */}
+                <div>
+                  <h4 style={{ fontSize: '0.875rem', marginBottom: '0.5rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                    Office CASES Workbook
+                    <span className="badge badge-info">Excel .xlsx</span>
+                  </h4>
+                  <label className={`upload-zone ${officeCasesFile ? 'has-file' : ''}`}>
+                    <input
+                      type="file"
+                      accept=".xlsx,.xls"
+                      onChange={handleOfficeCasesUpload}
+                      style={{ display: 'none' }}
+                    />
+                    {officeCasesFile ? (
+                      <div>
+                        <span style={{ color: '#22c55e' }}>✓</span> {officeCasesFile.name}
+                        <div style={{ fontSize: '0.75rem', color: '#71717a' }}>
+                          {officeCasesSheets.length} sheets
+                        </div>
+                      </div>
+                    ) : (
+                      <div style={{ color: '#71717a' }}>Drop Excel file or click to upload</div>
+                    )}
+                  </label>
+                </div>
               </div>
 
-              {/* Parse Report */}
-              {bahrParseReport.length > 0 && (
-                <div style={{ marginBottom: '1.5rem' }}>
-                  <h4 style={{ marginBottom: '0.5rem' }}>Parse Report</h4>
-                  <div style={{ maxHeight: '150px', overflowY: 'auto', fontSize: '0.8rem' }}>
-                    {bahrParseReport.map((item, i) => (
-                      <div key={i} style={{ display: 'flex', gap: '0.5rem', marginBottom: '0.25rem' }}>
-                        <span className={`badge badge-${item.type}`}>{item.type}</span>
-                        <span>{item.message}</span>
-                      </div>
-                    ))}
+              {/* Combined Stats */}
+              {(bahrExcelFile || officeCasesFile) && (
+                <div style={{ marginBottom: '1.5rem', padding: '1rem', background: 'rgba(34, 197, 94, 0.1)', borderRadius: '8px', border: '1px solid rgba(34, 197, 94, 0.3)' }}>
+                  <h4 style={{ color: '#4ade80', marginBottom: '0.5rem' }}>Combined Results</h4>
+                  <div style={{ fontSize: '0.9rem' }}>
+                    <strong>{combinedMergedClients.length}</strong> unique clients merged from{' '}
+                    <strong>{bahrSheets.length + officeCasesSheets.length}</strong> total sheets
+                  </div>
+                  <div style={{ fontSize: '0.75rem', color: '#71717a', marginTop: '0.25rem' }}>
+                    BAHR: {bahrSheets.length} sheets | Office CASES: {officeCasesSheets.length} sheets
                   </div>
                 </div>
               )}
 
-              {/* Sheets Overview */}
-              {bahrSheets.length > 0 && (
+              {/* Parse Reports - Tabbed */}
+              {(bahrParseReport.length > 0 || officeCasesParseReport.length > 0) && (
                 <div style={{ marginBottom: '1.5rem' }}>
-                  <h4 style={{ marginBottom: '0.5rem' }}>Sheets Found ({bahrSheets.length})</h4>
+                  <h4 style={{ marginBottom: '0.5rem' }}>Parse Reports</h4>
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '1rem' }}>
+                    {/* BAHR Report */}
+                    {bahrParseReport.length > 0 && (
+                      <div>
+                        <div style={{ fontSize: '0.75rem', color: '#a5b4fc', marginBottom: '0.25rem' }}>BAHR Workbook</div>
+                        <div style={{ maxHeight: '120px', overflowY: 'auto', fontSize: '0.8rem', background: 'rgba(0,0,0,0.2)', padding: '0.5rem', borderRadius: '6px' }}>
+                          {bahrParseReport.map((item, i) => (
+                            <div key={i} style={{ display: 'flex', gap: '0.5rem', marginBottom: '0.25rem' }}>
+                              <span className={`badge badge-${item.type}`}>{item.type}</span>
+                              <span style={{ fontSize: '0.75rem' }}>{item.message}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    {/* Office CASES Report */}
+                    {officeCasesParseReport.length > 0 && (
+                      <div>
+                        <div style={{ fontSize: '0.75rem', color: '#60a5fa', marginBottom: '0.25rem' }}>Office CASES Workbook</div>
+                        <div style={{ maxHeight: '120px', overflowY: 'auto', fontSize: '0.8rem', background: 'rgba(0,0,0,0.2)', padding: '0.5rem', borderRadius: '6px' }}>
+                          {officeCasesParseReport.map((item, i) => (
+                            <div key={i} style={{ display: 'flex', gap: '0.5rem', marginBottom: '0.25rem' }}>
+                              <span className={`badge badge-${item.type}`}>{item.type}</span>
+                              <span style={{ fontSize: '0.75rem' }}>{item.message}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* Sheets Overview - Combined */}
+              {(bahrSheets.length > 0 || officeCasesSheets.length > 0) && (
+                <div style={{ marginBottom: '1.5rem' }}>
+                  <h4 style={{ marginBottom: '0.5rem' }}>All Sheets ({bahrSheets.length + officeCasesSheets.length})</h4>
                   <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
                     {bahrSheets.map((sheet, i) => (
                       <div
-                        key={i}
+                        key={`bahr-${i}`}
                         style={{
                           background: 'rgba(99, 102, 241, 0.1)',
                           border: '1px solid rgba(99, 102, 241, 0.3)',
@@ -1951,7 +2163,24 @@ function ClioAirtableMerger() {
                           fontSize: '0.8rem',
                         }}
                       >
-                        <div style={{ fontWeight: 600, color: '#a5b4fc' }}>{sheet.name}</div>
+                        <div style={{ fontWeight: 600, color: '#a5b4fc' }}>[BAHR] {sheet.name}</div>
+                        <div style={{ fontSize: '0.7rem', color: '#71717a' }}>
+                          {sheet.rowCount} rows • {sheet.headers.length} columns
+                        </div>
+                      </div>
+                    ))}
+                    {officeCasesSheets.map((sheet, i) => (
+                      <div
+                        key={`office-${i}`}
+                        style={{
+                          background: 'rgba(59, 130, 246, 0.1)',
+                          border: '1px solid rgba(59, 130, 246, 0.3)',
+                          borderRadius: '6px',
+                          padding: '0.5rem 0.75rem',
+                          fontSize: '0.8rem',
+                        }}
+                      >
+                        <div style={{ fontWeight: 600, color: '#60a5fa' }}>[Office] {sheet.name}</div>
                         <div style={{ fontSize: '0.7rem', color: '#71717a' }}>
                           {sheet.rowCount} rows • {sheet.headers.length} columns
                         </div>
@@ -1962,10 +2191,10 @@ function ClioAirtableMerger() {
               )}
 
               {/* Download Buttons */}
-              {bahrMergedClients.length > 0 && (
+              {combinedMergedClients.length > 0 && (
                 <div style={{ display: 'flex', gap: '1rem', marginBottom: '1.5rem' }}>
                   <button className="btn btn-primary" onClick={downloadBahrClientSummary}>
-                    Download Client Summary ({bahrMergedClients.length} clients)
+                    Download Client Summary ({combinedMergedClients.length} clients)
                   </button>
                   <button className="btn btn-secondary" onClick={downloadBahrFlattenedCSV}>
                     Download Client Data (JSON)
@@ -1974,10 +2203,10 @@ function ClioAirtableMerger() {
               )}
 
               {/* Client Search and List */}
-              {bahrMergedClients.length > 0 && (
+              {combinedMergedClients.length > 0 && (
                 <div>
                   <div style={{ display: 'flex', gap: '1rem', alignItems: 'center', marginBottom: '1rem' }}>
-                    <h4 style={{ margin: 0 }}>Merged Clients ({bahrMergedClients.length})</h4>
+                    <h4 style={{ margin: 0 }}>Merged Clients ({combinedMergedClients.length})</h4>
                     <input
                       type="text"
                       placeholder="Search by name or A#..."
@@ -1999,7 +2228,7 @@ function ClioAirtableMerger() {
                   <div style={{ display: 'grid', gridTemplateColumns: '1fr 2fr', gap: '1rem', maxHeight: '500px' }}>
                     {/* Client List */}
                     <div style={{ overflowY: 'auto', maxHeight: '500px', background: 'rgba(0, 0, 0, 0.2)', borderRadius: '8px', padding: '0.5rem' }}>
-                      {bahrMergedClients
+                      {combinedMergedClients
                         .filter(client => {
                           if (!bahrSearchTerm) return true;
                           const search = bahrSearchTerm.toUpperCase();
@@ -2089,14 +2318,15 @@ function ClioAirtableMerger() {
               )}
 
               {/* Instructions */}
-              {!bahrExcelFile && (
+              {!bahrExcelFile && !officeCasesFile && (
                 <div style={{ marginTop: '1.5rem', padding: '1rem', background: 'rgba(99, 102, 241, 0.1)', borderRadius: '8px', border: '1px solid rgba(99, 102, 241, 0.3)' }}>
                   <h4 style={{ color: '#a5b4fc', marginBottom: '0.5rem' }}>How it works</h4>
                   <ol style={{ fontSize: '0.875rem', color: '#a1a1aa', paddingLeft: '1.25rem' }}>
-                    <li>Upload the Bahr Excel workbook (.xlsx)</li>
-                    <li>Parser reads all sheets and extracts client data</li>
-                    <li>Clients are matched across sheets by A# (priority) or name</li>
-                    <li>View merged data or download flattened CSV</li>
+                    <li>Upload one or both Excel workbooks (.xlsx)</li>
+                    <li>Parser reads all sheets from each file and extracts client data</li>
+                    <li>Clients are matched across ALL sheets by A# (priority) or name</li>
+                    <li>Data from both files is merged into a single flat-packed record per client</li>
+                    <li>View merged data or download combined CSV/JSON</li>
                   </ol>
                   <div style={{ marginTop: '1rem', fontSize: '0.8rem', color: '#71717a' }}>
                     <strong>Recognized columns (case-insensitive):</strong><br/>
@@ -2106,7 +2336,8 @@ function ClioAirtableMerger() {
                     <br/>
                     <strong>Smart features:</strong><br/>
                     • Auto-detects header row (skips "Column 1", "Column 2" generic headers)<br/>
-                    • Supports Spanish column names (Nombre del Cliente, etc.)
+                    • Supports Spanish column names (Nombre del Cliente, etc.)<br/>
+                    • Merges clients with same A# or name from different files
                   </div>
                 </div>
               )}
@@ -2125,18 +2356,18 @@ function ClioAirtableMerger() {
                 {/* Phase 0 Data Status */}
                 <div>
                   <h4 style={{ fontSize: '0.875rem', marginBottom: '0.5rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                    BAHR Data (from Phase 0)
+                    Combined Excel Data (from Phase 0)
                     <span className="badge badge-warning">Required</span>
                   </h4>
-                  <p style={{ fontSize: '0.75rem', color: '#71717a', marginBottom: '0.5rem' }}>Parsed from Excel in Phase 0</p>
-                  <div className={`upload-zone ${bahrMergedClients.length > 0 ? 'has-file' : ''}`} style={{ cursor: 'default' }}>
-                    {bahrMergedClients.length > 0 ? (
+                  <p style={{ fontSize: '0.75rem', color: '#71717a', marginBottom: '0.5rem' }}>Parsed from both Excel files in Phase 0</p>
+                  <div className={`upload-zone ${combinedMergedClients.length > 0 ? 'has-file' : ''}`} style={{ cursor: 'default' }}>
+                    {combinedMergedClients.length > 0 ? (
                       <div>
                         <span style={{ color: '#22c55e' }}>✓</span> Phase 0 data loaded
-                        <div style={{ fontSize: '0.75rem', color: '#71717a' }}>{bahrMergedClients.length} clients</div>
+                        <div style={{ fontSize: '0.75rem', color: '#71717a' }}>{combinedMergedClients.length} unique clients</div>
                       </div>
                     ) : (
-                      <div style={{ color: '#ef4444' }}>⚠ Parse BAHR Excel in Phase 0 first</div>
+                      <div style={{ color: '#ef4444' }}>⚠ Parse Excel files in Phase 0 first</div>
                     )}
                   </div>
                 </div>
@@ -2165,7 +2396,7 @@ function ClioAirtableMerger() {
               <button
                 className="btn btn-primary"
                 onClick={runPhase1}
-                disabled={bahrMergedClients.length === 0}
+                disabled={combinedMergedClients.length === 0}
                 style={{ marginBottom: '1.5rem' }}
               >
                 Generate clients.csv
