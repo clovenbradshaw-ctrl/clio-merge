@@ -1486,7 +1486,13 @@ function ClioAirtableMerger() {
     lastName: ['last name', 'lastname', 'family name', 'surname', 'apellido', 'apellidos'],
     middleName: ['middle name', 'middlename', 'segundo nombre'],
     dob: ['dob', 'date of birth', 'birthdate', 'birth date', 'date_of_birth', 'fecha de nacimiento'],
-    phone: ['phone', 'telephone', 'telphone', 'cell', 'mobile', 'telefono', 'celular'],
+    phone: [
+      'phone', 'telephone', 'telphone', 'cell', 'mobile', 'telefono', 'celular',
+      'home phone', 'work phone', 'business phone', 'primary phone', 'mobile phone',
+      'cell phone', 'other phone', 'phone number', 'phone 1', 'phone 2', 'phone1', 'phone2',
+      'daytime phone', 'evening phone', 'contact phone', 'alternate phone', 'alt phone',
+      'fax', 'tel', 'numero de telefono', 'número de teléfono', 'tel movil', 'tel casa'
+    ],
     email: ['email', 'e-mail', 'correo', 'correo electronico'],
     addressLine1: ['street', 'address', 'street number and name', 'direccion', 'calle'],
     addressLine2: ['address line 2', 'apt', 'suite', 'unit', 'apartamento'],
@@ -1496,6 +1502,63 @@ function ClioAirtableMerger() {
     country: ['country', 'citizenship', 'nationality', 'pais', 'nacionalidad', '18.a'],
     entryDate: ['entry date', 'arrival', 'date of last arrival', '22.'],
     placeOfEntry: ['place of entry', 'place of last arrival', 'port of entry', '23.'],
+  };
+
+  // Check if a value looks like a phone number (10+ digits) vs A# (9 digits)
+  // A# format: xxx-xxx-xxx (9 digits), Phone format: xxx-xxx-xxxx (10 digits)
+  const isLikelyPhoneNumber = (value) => {
+    if (!value) return false;
+    const digits = String(value).replace(/\D/g, '');
+    // Phone numbers have 10+ digits (US), A# has exactly 9
+    // Also accept 11 digits (country code + 10)
+    if (digits.length >= 10) return true;
+    // 7 digits could be a local number without area code
+    if (digits.length === 7) return true;
+    // Exactly 9 digits is likely an A#, not a phone
+    if (digits.length === 9) return false;
+    return false;
+  };
+
+  // Check if a column name looks like an A# column (to exclude from phone search)
+  const isANumberColumn = (columnName) => {
+    const normalized = normalizeColumnName(columnName);
+    return A_NUMBER_PATTERNS.some(pattern =>
+      normalized === pattern || normalized.includes(pattern)
+    );
+  };
+
+  // Specialized phone extractor that checks all phone-like columns and validates values
+  const findPhoneInSheetData = (sheetData) => {
+    const phoneValues = [];
+
+    for (const [sheetName, records] of Object.entries(sheetData)) {
+      for (const record of records) {
+        for (const [key, value] of Object.entries(record.data || {})) {
+          if (!value || !String(value).trim()) continue;
+
+          const normalizedKey = normalizeColumnName(key);
+
+          // Skip if this column is an A# column
+          if (isANumberColumn(key)) continue;
+
+          // Check if column matches phone patterns
+          const isPhoneColumn = FIELD_PATTERNS.phone.some(pattern =>
+            normalizedKey === pattern || normalizedKey.includes(pattern)
+          );
+
+          if (isPhoneColumn) {
+            const strValue = String(value).trim();
+            // Validate it looks like a phone number, not an A#
+            if (isLikelyPhoneNumber(strValue)) {
+              phoneValues.push(strValue);
+            }
+          }
+        }
+      }
+    }
+
+    // Return first valid phone found
+    return phoneValues.length > 0 ? phoneValues[0] : '';
   };
 
   const runPhase1 = useCallback(() => {
@@ -1612,7 +1675,7 @@ function ClioAirtableMerger() {
         firstName,
         middleName,
         aNumber: aNumberResult.isValid ? aNumberResult.normalized : '',
-        phone: findFieldInSheetData(client.sheetData, FIELD_PATTERNS.phone),
+        phone: findPhoneInSheetData(client.sheetData),
         email: findFieldInSheetData(client.sheetData, FIELD_PATTERNS.email),
         addressLine1: findFieldInSheetData(client.sheetData, FIELD_PATTERNS.addressLine1),
         addressLine2: findFieldInSheetData(client.sheetData, FIELD_PATTERNS.addressLine2),

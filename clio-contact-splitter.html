@@ -258,6 +258,11 @@ const transformers = {
     if (!value) return '';
     // Remove all non-digit characters
     const digits = value.replace(/\D/g, '');
+    // IMPORTANT: A# format is xxx-xxx-xxx (9 digits), phone is xxx-xxx-xxxx (10 digits)
+    // Reject values that look like A# (exactly 9 digits)
+    if (digits.length === 9) {
+      return ''; // This is likely an A#, not a phone number
+    }
     // Handle US numbers
     if (digits.length === 10) {
       return digits; // Return as 10 digits for Airtable
@@ -265,7 +270,11 @@ const transformers = {
     if (digits.length === 11 && digits.startsWith('1')) {
       return digits.slice(1); // Remove leading 1
     }
-    return digits || value; // Return what we have
+    // Accept 7 digits as local number, or 10+ as valid phone
+    if (digits.length >= 7 && digits.length !== 9) {
+      return digits;
+    }
+    return ''; // Reject invalid lengths
   },
 
   normalizeEmail: (value) => {
@@ -480,6 +489,35 @@ function transformClioToAirtable(headers, rows) {
         fieldSet[airtable] = priority || 999;
       }
     });
+
+    // Second pass: Look for ANY column with "phone" in the name that we might have missed
+    // This catches custom phone fields or differently-named phone columns
+    if (!record['Phone Number']) {
+      const phonePatterns = ['phone', 'telephone', 'cell', 'mobile', 'tel', 'telefono', 'celular'];
+      const aNumberPatterns = ['a#', 'a number', 'anumber', 'alien', 'a-number', 'a-#'];
+
+      headers.forEach((header, colIdx) => {
+        if (record['Phone Number']) return; // Already found one
+
+        const value = row[colIdx] || '';
+        if (!value) return;
+
+        const headerLower = header.toLowerCase().trim();
+
+        // Skip if this looks like an A# column
+        const isANumberCol = aNumberPatterns.some(p => headerLower.includes(p));
+        if (isANumberCol) return;
+
+        // Check if header contains any phone pattern
+        const isPhoneCol = phonePatterns.some(p => headerLower.includes(p));
+        if (isPhoneCol) {
+          const normalized = transformers.normalizePhone(value);
+          if (normalized) {
+            record['Phone Number'] = normalized;
+          }
+        }
+      });
+    }
 
     // Extract A# from tags
     const tags = [];
