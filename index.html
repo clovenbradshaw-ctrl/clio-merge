@@ -173,7 +173,11 @@ const generateFallbackId = (lastName, firstName, dob) => {
 
 // Normalize name for matching
 const normalizeName = (lastName, firstName) => {
-  const clean = (s) => (s || '').toUpperCase().trim().replace(/[^A-Z\s]/g, '');
+  const clean = (s) => {
+    if (!s) return '';
+    // Normalize diacritics first (é→e, ñ→n, etc), then uppercase and remove non-alphabetic
+    return s.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase().trim().replace(/[^A-Z\s]/g, '').replace(/\s+/g, ' ');
+  };
   return `${clean(lastName)}|${clean(firstName)}`;
 };
 
