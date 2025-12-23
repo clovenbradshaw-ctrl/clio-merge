@@ -1752,6 +1752,59 @@ function ClioAirtableMerger() {
                 </details>
               </div>
 
+              {/* AI Schema Review Prompt */}
+              <div style={{ marginTop: '1.5rem', padding: '1rem', background: 'rgba(34, 197, 94, 0.1)', borderRadius: '8px', border: '1px solid rgba(34, 197, 94, 0.3)' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
+                  <h4 style={{ margin: 0, color: '#4ade80' }}>AI Schema Review Prompt</h4>
+                  <button
+                    className="btn btn-secondary"
+                    style={{ fontSize: '0.75rem', padding: '0.25rem 0.5rem' }}
+                    onClick={() => {
+                      const prompt = `You are reviewing Airtable schemas to improve field mappings for a Clio legal practice management data migration.
+
+## Context
+We're migrating data from Clio (legal practice management) to Airtable. The main entities are:
+- **Clients** (contacts from Clio) → Airtable Clients table
+- **Case Master View** (matters from Clio) → cases/matters with linked clients
+- **Calendar Events** (events from Clio) → hearings, deadlines, appointments
+- **Relationships** → family/professional relationships between clients
+
+## Current Clio Export Fields
+From Clio we get: ContactId, Name, Email, Phone, Address, MatterId, MatterDescription, EventDate, EventType, RelationshipDescription, etc.
+
+## Your Task
+Review the Airtable schema(s) I paste below and:
+1. **Identify missing fields** - What Clio data can't be stored?
+2. **Suggest field type improvements** - Wrong types? (e.g., should be linked record, single select, etc.)
+3. **Flag naming inconsistencies** - Fields that should match across tables
+4. **Recommend new fields** - Useful additions for legal practice (A#, court info, deadlines)
+5. **Note linked record opportunities** - Where should tables connect?
+
+## Response Format
+Keep it concise. Use this structure:
+\`\`\`
+TABLE: [name]
+✓ Good: [what's working]
+⚠ Issues: [problems found]
+→ Suggestions: [specific changes]
+\`\`\`
+
+## Schema to Review
+Paste the JSON schema below:
+
+`;
+                      navigator.clipboard.writeText(prompt);
+                      alert('AI prompt copied to clipboard!');
+                    }}
+                  >
+                    Copy Prompt
+                  </button>
+                </div>
+                <p style={{ fontSize: '0.75rem', color: '#71717a', margin: 0 }}>
+                  Copy this prompt, then paste your schema JSON after it. The AI will review field mappings and suggest improvements.
+                </p>
+              </div>
+
               {/* Expected Fields Reference */}
               <div style={{ marginTop: '1.5rem' }}>
                 <h4 style={{ marginBottom: '0.75rem' }}>Expected Airtable Fields by Table</h4>
