@@ -13,6 +13,9 @@
   <script type="text/babel">
 const { useState, useCallback } = React;
 
+// Constants
+const ANDREW_BAHR_RECORD_ID = 'recRaQ8cur6na6kIw';
+
 // State-machine CSV Parser - handles multiline quoted fields correctly
 const parseCSV = (text) => {
   if (!text || !text.trim()) return { headers: [], rows: [] };
@@ -22,50 +25,36 @@ const parseCSV = (text) => {
   let currentField = '';
   let inQuotes = false;
 
-  // Character-by-character state machine
   for (let i = 0; i < text.length; i++) {
     const char = text[i];
     const nextChar = text[i + 1];
 
     if (inQuotes) {
-      // IN_QUOTES state
       if (char === '"' && nextChar === '"') {
-        // Escaped quote "" -> single "
         currentField += '"';
-        i++; // Skip next quote
+        i++;
       } else if (char === '"') {
-        // Exit quotes
         inQuotes = false;
       } else {
-        // Append character (including newlines inside quotes)
         currentField += char;
       }
     } else {
-      // NOT_IN_QUOTES state
       if (char === '"') {
-        // Enter quotes
         inQuotes = true;
       } else if (char === ',') {
-        // End field, start new field
         currentRow.push(currentField.trim());
         currentField = '';
       } else if (char === '\n' || (char === '\r' && nextChar === '\n')) {
-        // End field, end row
         currentRow.push(currentField.trim());
         currentField = '';
-
-        // Only add non-empty rows (at least one non-empty field)
         if (currentRow.some(f => f !== '')) {
           rows.push([...currentRow]);
         }
         currentRow = [];
-
-        // Skip \n in \r\n
         if (char === '\r' && nextChar === '\n') {
           i++;
         }
       } else if (char === '\r') {
-        // Standalone \r (old Mac format)
         currentRow.push(currentField.trim());
         currentField = '';
         if (currentRow.some(f => f !== '')) {
@@ -73,13 +62,11 @@ const parseCSV = (text) => {
         }
         currentRow = [];
       } else {
-        // Append regular character
         currentField += char;
       }
     }
   }
 
-  // Handle final field/row (file may not end with newline)
   if (currentField !== '' || currentRow.length > 0) {
     currentRow.push(currentField.trim());
     if (currentRow.some(f => f !== '')) {
@@ -100,7 +87,6 @@ const parseCSV = (text) => {
 };
 
 // Normalize A# to ###-###-### format
-// Returns { normalized, isValid, original, issue }
 const normalizeANumber = (aNum) => {
   if (!aNum || !aNum.trim()) {
     return { normalized: '', isValid: false, original: aNum, issue: 'empty' };
@@ -118,7 +104,6 @@ const normalizeANumber = (aNum) => {
   }
 
   if (digits.length === 10 && digits[0] === '1') {
-    // Handle leading 1 (sometimes added as country code artifact)
     return {
       normalized: `${digits.slice(1, 4)}-${digits.slice(4, 7)}-${digits.slice(7, 10)}`,
       isValid: true,
@@ -127,19 +112,12 @@ const normalizeANumber = (aNum) => {
     };
   }
 
-  // Invalid digit count
   return {
     normalized: digits,
     isValid: false,
     original: aNum,
     issue: `wrong-length-${digits.length}`
   };
-};
-
-// Simple string version for backward compatibility
-const normalizeANumberSimple = (aNum) => {
-  const result = normalizeANumber(aNum);
-  return result.normalized;
 };
 
 // Generate fallback ID for clients without valid A#
@@ -153,56 +131,45 @@ const generateFallbackId = (lastName, firstName, dob) => {
   return `PENDING-${cleanLast}-${cleanFirst}${cleanDob ? '-' + cleanDob : ''}`;
 };
 
-// Extract A# using multiple patterns (ordered by specificity)
-const extractANumber = (text) => {
-  if (!text) return null;
-
-  const patterns = [
-    // |A-203-599-282 or |A203599282 (pipe delimiter format)
-    /\|A-?(\d{3})-?(\d{3})-?(\d{3})/i,
-    // A-Number: 213-645-057 or A-Number:213645057
-    /A-Number:?\s*(\d{3})-?(\d{3})-?(\d{3})/i,
-    // A# 123-456-789 or A#: 123456789
-    /A#\s*:?\s*(\d{3})-?(\d{3})-?(\d{3})/i,
-    // A-213-645-057 or A-213645057 (standalone A- prefix)
-    /\bA-(\d{3})-?(\d{3})-?(\d{3})\b/i,
-    // Raw 9 digits at word boundary (last resort)
-    /\b(\d{3})-?(\d{3})-?(\d{3})\b/,
-  ];
-
-  for (const pattern of patterns) {
-    const match = text.match(pattern);
-    if (match) {
-      // Collect capture groups and normalize
-      const digits = match.slice(1).join('').replace(/\D/g, '');
-      if (digits.length === 9) {
-        return `${digits.slice(0, 3)}-${digits.slice(3, 6)}-${digits.slice(6, 9)}`;
-      }
-    }
-  }
-  return null; // No A# found
-};
-
 // Normalize name for matching
 const normalizeName = (lastName, firstName) => {
   const clean = (s) => (s || '').toUpperCase().trim().replace(/[^A-Z\s]/g, '');
   return `${clean(lastName)}|${clean(firstName)}`;
 };
 
-// Known hearing type keywords (in order of specificity)
-const HEARING_TYPE_KEYWORDS = ['MASTER', 'MCH', 'INDIVIDUAL', 'ICH', 'BOND', 'STATUS', 'CUSTODY', 'CALENDAR'];
+// Extract A# from text
+const extractANumber = (text) => {
+  if (!text) return null;
 
-// Parse event summary using strip-and-extract approach
+  const patterns = [
+    /\|A-?(\d{3})-?(\d{3})-?(\d{3})/i,
+    /A-Number:?\s*(\d{3})-?(\d{3})-?(\d{3})/i,
+    /A#\s*:?\s*(\d{3})-?(\d{3})-?(\d{3})/i,
+    /\bA-(\d{3})-?(\d{3})-?(\d{3})\b/i,
+    /\b(\d{3})-?(\d{3})-?(\d{3})\b/,
+  ];
+
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    if (match) {
+      const digits = match.slice(1).join('').replace(/\D/g, '');
+      if (digits.length === 9) {
+        return `${digits.slice(0, 3)}-${digits.slice(3, 6)}-${digits.slice(6, 9)}`;
+      }
+    }
+  }
+  return null;
+};
+
+// Parse event summary
 const parseEventSummary = (summary) => {
   if (!summary) return { hearingType: '', clientName: '', aNumber: null, status: '', court: '', matterId: '' };
 
   const result = { hearingType: '', clientName: '', aNumber: null, status: '', court: '', matterId: '' };
   let working = summary;
 
-  // Step 1: Extract A# first (required for matching)
   result.aNumber = extractANumber(working);
 
-  // Remove A# and everything after it from working string for cleaner parsing
   working = working
     .replace(/\|A-?Number:?\s*\d{3}-?\d{3}-?\d{3}/gi, '')
     .replace(/\|A-?\d{3}-?\d{3}-?\d{3}/gi, '')
@@ -210,176 +177,42 @@ const parseEventSummary = (summary) => {
     .replace(/A#\s*:?\s*\d{3}-?\d{3}-?\d{3}/gi, '')
     .replace(/\bA-\d{3}-?\d{3}-?\d{3}\b/gi, '');
 
-  // Step 2: Remove and extract ***...*** wrapper blocks
-  const starBlockMatches = working.match(/\*{2,}([^*]+)\*{2,}/g) || [];
-  for (const block of starBlockMatches) {
-    const content = block.replace(/\*+/g, '').trim().toUpperCase();
-    // Check if it's a status keyword
-    if (['COV APPROVED', 'RESCHEDULED', 'CANCELLED', 'CONFIRMED', 'POSTPONED'].some(s => content.includes(s))) {
-      if (content.includes('RESCHEDULED')) result.status = 'RESCHEDULED';
-      else if (content.includes('CANCELLED')) result.status = 'CANCELLED';
-      else if (content.includes('CONFIRMED')) result.status = 'CONFIRMED';
-      else if (content.includes('POSTPONED')) result.status = 'POSTPONED';
-    }
-  }
-  working = working.replace(/\*{2,}[^*]+\*{2,}/g, ' ').trim();
-
-  // Step 3: Extract status from start of string (if not already found in *** blocks)
-  if (!result.status) {
-    const statusMatch = working.match(/^(RESCHEDULED|CANCELLED|CONFIRMED|POSTPONED)\s+/i);
-    if (statusMatch) {
-      result.status = statusMatch[1].toUpperCase();
-      working = working.slice(statusMatch[0].length);
-    }
-  }
-
-  // Step 4: Extract matter ID (in parentheses like "00026-Mendez Alvarado")
+  // Extract matter ID (in parentheses like "00026-Mendez Alvarado")
   const matterMatch = working.match(/\((\d{4,}-[^)]+)\)/);
   if (matterMatch) {
     result.matterId = matterMatch[1];
     working = working.replace(matterMatch[0], '').trim();
   }
 
-  // Step 5: Try XXX-TYPE-NAME pattern (e.g., ARL-MASTER-NAME or NEW ORLEANS, LA MASTER NAME)
-  // Pattern A: CODE-TYPE-NAME (hyphen separated)
-  const codeTypeNameMatch = working.match(/^([A-Z]{2,4})-([A-Z]+)-(.+)/i);
-  if (codeTypeNameMatch) {
-    result.court = codeTypeNameMatch[1].toUpperCase();
-    result.hearingType = codeTypeNameMatch[2].toUpperCase();
-    result.clientName = codeTypeNameMatch[3].trim().replace(/\s+/g, ' ');
-  } else {
-    // Pattern B: CITY, STATE TYPE NAME (space separated after city)
-    // e.g., "NEW ORLEANS, LA MASTER UTO-LOPEZ, REYNA ELIZABETH"
-    const cityTypeMatch = working.match(/^(.+?,\s*[A-Z]{2})\s+(MASTER|MCH|INDIVIDUAL|ICH|BOND|STATUS)\s+(.+)/i);
-    if (cityTypeMatch) {
-      result.court = cityTypeMatch[1].toUpperCase();
-      result.hearingType = cityTypeMatch[2].toUpperCase();
-      result.clientName = cityTypeMatch[3].trim().replace(/\s+/g, ' ');
-    } else {
-      // Pattern C: Just TYPE-NAME (no court prefix)
-      const typeNameMatch = working.match(/^(MASTER|MCH|INDIVIDUAL|ICH|BOND|STATUS)[-\s]+(.+)/i);
-      if (typeNameMatch) {
-        result.hearingType = typeNameMatch[1].toUpperCase();
-        result.clientName = typeNameMatch[2].trim().replace(/\s+/g, ' ');
-      } else {
-        // Fallback: look for hearing type anywhere and extract name before/after
-        for (const typeKw of HEARING_TYPE_KEYWORDS) {
-          const typeIdx = working.toUpperCase().indexOf(typeKw);
-          if (typeIdx >= 0) {
-            result.hearingType = typeKw;
-            const beforeType = working.slice(0, typeIdx).trim();
-            const afterType = working.slice(typeIdx + typeKw.length).trim().replace(/^[-\s]+/, '');
-
-            // Court is usually before the type
-            if (beforeType.length > 0 && beforeType.length < 30) {
-              result.court = beforeType.toUpperCase();
-            }
-            // Name is after the type
-            if (afterType.length > 0) {
-              result.clientName = afterType.replace(/\s+/g, ' ');
-            }
-            break;
-          }
-        }
-      }
+  // Extract hearing type
+  const HEARING_TYPES = ['MASTER', 'MCH', 'INDIVIDUAL', 'ICH', 'BOND', 'STATUS', 'CUSTODY', 'CALENDAR'];
+  for (const typeKw of HEARING_TYPES) {
+    if (working.toUpperCase().includes(typeKw)) {
+      result.hearingType = typeKw;
+      break;
     }
-  }
-
-  // Clean up client name (remove trailing pipes, extra spaces, etc.)
-  if (result.clientName) {
-    result.clientName = result.clientName
-      .replace(/\|.*$/, '') // Remove everything after pipe
-      .replace(/\s+/g, ' ')
-      .trim();
   }
 
   return result;
 };
 
-// Parse event description to extract judge, riders, court address
+// Parse event description
 const parseEventDescription = (desc) => {
-  if (!desc) return { judge: '', riders: [], courtAddress: '' };
+  if (!desc) return { judge: '', courtAddress: '' };
 
-  const result = { judge: '', riders: [], courtAddress: '' };
+  const result = { judge: '', courtAddress: '' };
 
-  // Extract riders (format: RIDER: NAME|A-Number: ###-###-###)
-  const riderMatches = desc.matchAll(/RIDER:\s*([^|]+)\|A-?Number:?\s*([\d-]+)/gi);
-  for (const match of riderMatches) {
-    result.riders.push({ name: match[1].trim(), aNumber: normalizeANumberSimple(match[2]) });
+  const judgeMatch = desc.match(/JUDGE[:\s]+([A-Za-z][^\n|]+)/i);
+  if (judgeMatch) {
+    result.judge = judgeMatch[1].trim().replace(/\s*(COURT|ADDRESS|RIDER).*$/i, '').trim();
   }
 
-  // Extract judge - multiple patterns in order of specificity
-  // Pattern 1: JUDGE on its own line, name on next line (multiline format)
-  const multilineJudgeMatch = desc.match(/JUDGE\s*\n\s*([A-Za-z][^\n]+)/i);
-  if (multilineJudgeMatch) {
-    result.judge = multilineJudgeMatch[1].trim();
-  } else {
-    // Pattern 2: JUDGE: Name or JUDGE Name (same line)
-    const inlineJudgeMatch = desc.match(/JUDGE[:\s]+([A-Za-z][^\n|]+)/i);
-    if (inlineJudgeMatch) {
-      // Clean up the judge name (stop at common delimiters)
-      let judgeName = inlineJudgeMatch[1].trim();
-      // Remove anything after COURT or ADDRESS or other section headers
-      judgeName = judgeName.replace(/\s*(COURT|ADDRESS|RIDER|WEBEX|TELEPHONIC).*$/i, '').trim();
-      result.judge = judgeName;
-    }
-  }
-
-  // Extract court address - can span multiple lines after "COURT ADDRESS"
-  const addressMatch = desc.match(/COURT\s*ADDRESS[:\s]*\n?([^]*?)(?=\n\s*(?:RIDER|WEBEX|TELEPHONIC|\n\n|$))/i);
+  const addressMatch = desc.match(/COURT\s*ADDRESS[:\s]+([^\n]+)/i);
   if (addressMatch) {
-    // Join multiline address into single line
-    result.courtAddress = addressMatch[1]
-      .split('\n')
-      .map(line => line.trim())
-      .filter(line => line.length > 0)
-      .join(', ')
-      .replace(/,\s*,/g, ',')
-      .trim();
-  } else {
-    // Fallback: simpler pattern
-    const simpleAddressMatch = desc.match(/COURT\s*ADDRESS[:\s]+([^\n]+)/i);
-    if (simpleAddressMatch) {
-      result.courtAddress = simpleAddressMatch[1].trim();
-    }
+    result.courtAddress = addressMatch[1].trim();
   }
 
   return result;
-};
-
-// Parse matter field to extract client reference
-const parseMatterField = (matter) => {
-  if (!matter) return { matterId: '', lastName: '' };
-
-  // Pattern: "00006-Hernandez"
-  const match = matter.match(/(\d+)-(.+)/);
-  if (match) {
-    return { matterId: match[1], lastName: match[2].trim().toUpperCase() };
-  }
-  return { matterId: '', lastName: matter.toUpperCase() };
-};
-
-// Generate CSV string from data
-const generateCSV = (headers, rows) => {
-  const escapeField = (field) => {
-    const str = String(field || '');
-    if (str.includes(',') || str.includes('"') || str.includes('\n')) {
-      return `"${str.replace(/"/g, '""')}"`;
-    }
-    return str;
-  };
-
-  const headerRow = headers.map(escapeField).join(',');
-  const dataRows = rows.map(row => headers.map(h => escapeField(row[h])).join(','));
-  return [headerRow, ...dataRows].join('\n');
-};
-
-// Airtable select field options for validation
-const AIRTABLE_OPTIONS = {
-  eventType: ['Hearing', 'Interview', 'ICE Appt', 'Status Conference', 'Bond', 'CFI/RFI', 'Brief Due', 'Calendar Control', 'Test Event'],
-  eventSubType: ['Master', 'Individual', 'Pre-Hearing Conf', 'Call Up Date', 'Asylum Interview', 'USCIS Interview', 'Status Docket', 'Appeal Notice Due'],
-  eventHearingType: ['Master', 'Individual', 'Bond', 'Status Docket', 'Custody', 'Calendar Control', 'Pending ICH Decision'],
-  country: ['Afghanistan', 'Albania', 'Algeria', 'Argentina', 'Bahamas', 'Belize', 'Bolivia', 'Brazil', 'Burma', 'Burundi', 'Cameroon', 'Canada', 'Chile', 'China', 'Colombia', 'Costa Rica', 'Cuba', 'Dominican Republic', 'Ecuador', 'Egypt', 'El Salvador', 'Ethiopia', 'Ghana', 'Guatemala', 'Guinea', 'Haiti', 'Honduras', 'India', 'Iran', 'Iraq', 'Jamaica', 'Jordan', 'Kenya', 'Lebanon', 'Liberia', 'Malaysia', 'Mauritania', 'Mexico', 'Mongolia', 'Morocco', 'Nepal', 'Nicaragua', 'Nigeria', 'Pakistan', 'Panama', 'Peru', 'Philippines', 'Romania', 'Russia', 'Sierra Leone', 'Somalia', 'South Africa', 'South Korea', 'Sudan', 'Syria', 'Taiwan', 'Tanzania', 'Thailand', 'Tunisia', 'Turkiye', 'Turkey', 'Uganda', 'Ukraine', 'United Kingdom', 'United States', 'USA', 'Venezuela', 'Vietnam', 'Yemen'],
 };
 
 // Map hearing type from Clio to Airtable
@@ -395,27 +228,54 @@ const mapHearingType = (clioType) => {
   return mapping[clioType?.toUpperCase()] || clioType;
 };
 
+// Generate CSV string from data
+const generateCSV = (headers, rows) => {
+  const escapeField = (field) => {
+    const str = String(field ?? '');
+    if (str.includes(',') || str.includes('"') || str.includes('\n')) {
+      return `"${str.replace(/"/g, '""')}"`;
+    }
+    return str;
+  };
+
+  const headerRow = headers.map(escapeField).join(',');
+  const dataRows = rows.map(row => headers.map(h => escapeField(row[h])).join(','));
+  return [headerRow, ...dataRows].join('\n');
+};
+
 // Main App Component
 function ClioAirtableMerger() {
-  const [files, setFiles] = useState({
-    bahr: null,
-    contacts: null,
-    events: null,
-    matterNotes: null,
+  const [activePhase, setActivePhase] = useState(1);
+
+  // Phase 1 state
+  const [phase1Files, setPhase1Files] = useState({ bahr: null, clioContacts: null });
+  const [phase1Data, setPhase1Data] = useState({ bahr: null, clioContacts: null });
+  const [phase1Result, setPhase1Result] = useState(null);
+  const [phase1Report, setPhase1Report] = useState([]);
+
+  // Phase 2 state
+  const [phase2Files, setPhase2Files] = useState({ airtableClients: null, clioMatters: null, clioNotes: null });
+  const [phase2Data, setPhase2Data] = useState({ airtableClients: null, clioMatters: null, clioNotes: null });
+  const [phase2Result, setPhase2Result] = useState(null);
+  const [phase2Report, setPhase2Report] = useState([]);
+
+  // Phase 3 state
+  const [phase3Files, setPhase3Files] = useState({
+    airtableClients: null,
+    airtableCaseMaster: null,
+    clioEvents: null,
+    clioRelationships: null
   });
-
-  const [parsedData, setParsedData] = useState({
-    bahr: null,
-    contacts: null,
-    events: null,
-    matterNotes: null,
+  const [phase3Data, setPhase3Data] = useState({
+    airtableClients: null,
+    airtableCaseMaster: null,
+    clioEvents: null,
+    clioRelationships: null
   });
+  const [phase3Result, setPhase3Result] = useState(null);
+  const [phase3Report, setPhase3Report] = useState([]);
 
-  const [mergeResult, setMergeResult] = useState(null);
-  const [activeTab, setActiveTab] = useState('upload');
-  const [validationReport, setValidationReport] = useState([]);
-
-  const handleFileUpload = (type) => (event) => {
+  const handleFileUpload = (phase, type) => (event) => {
     const file = event.target.files[0];
     if (!file) return;
 
@@ -424,39 +284,42 @@ function ClioAirtableMerger() {
       const text = e.target.result;
       const parsed = parseCSV(text);
 
-      setFiles(prev => ({ ...prev, [type]: file }));
-      setParsedData(prev => ({ ...prev, [type]: parsed }));
+      if (phase === 1) {
+        setPhase1Files(prev => ({ ...prev, [type]: file }));
+        setPhase1Data(prev => ({ ...prev, [type]: parsed }));
+      } else if (phase === 2) {
+        setPhase2Files(prev => ({ ...prev, [type]: file }));
+        setPhase2Data(prev => ({ ...prev, [type]: parsed }));
+      } else if (phase === 3) {
+        setPhase3Files(prev => ({ ...prev, [type]: file }));
+        setPhase3Data(prev => ({ ...prev, [type]: parsed }));
+      }
     };
     reader.readAsText(file);
   };
 
-  const performMerge = useCallback(() => {
+  // Phase 1: Client Import
+  const runPhase1 = useCallback(() => {
     const reports = [];
+    const bahrLookup = new Map();
+    const clientsOutput = [];
 
-    // Step 1: Build lookup from Bahr dataset (authority for A#)
-    const bahrLookup = new Map(); // name -> record
-    const aNumberLookup = new Map(); // A# -> record (valid A#s only)
-    const clientIdLookup = new Map(); // clientId (A# or fallback) -> record
-
-    // Track A# validation issues
     let validANumbers = 0;
     let invalidANumbers = 0;
     let missingANumbers = 0;
-    const aNumberIssues = [];
 
-    if (parsedData.bahr?.rows) {
-      parsedData.bahr.rows.forEach((row, idx) => {
+    // Build Bahr lookup
+    if (phase1Data.bahr?.rows) {
+      phase1Data.bahr.rows.forEach((row, idx) => {
         const lastName = row['Last Name'] || '';
         const firstName = row['First Name'] || '';
         const middleName = row['Middle Name'] || '';
         const dob = row['DOB'] || '';
         const rawANumber = row['A number'] || '';
 
-        // Validate and normalize A#
         const aNumberResult = normalizeANumber(rawANumber);
         const nameKey = normalizeName(lastName, firstName);
 
-        // Determine client ID (valid A# or fallback)
         let clientId = '';
         let aNumberStatus = '';
 
@@ -465,35 +328,23 @@ function ClioAirtableMerger() {
           aNumberStatus = 'valid';
           validANumbers++;
         } else if (aNumberResult.issue === 'empty') {
-          // No A# provided - generate fallback
           clientId = generateFallbackId(lastName, firstName, dob) || `PENDING-ROW-${idx}`;
           aNumberStatus = 'missing';
           missingANumbers++;
-          aNumberIssues.push({
-            row: idx + 2, // +2 for header and 0-index
-            name: `${firstName} ${lastName}`,
-            issue: 'Missing A# - using fallback ID',
-            fallbackId: clientId
-          });
         } else {
-          // Invalid A# format (wrong digit count)
           clientId = generateFallbackId(lastName, firstName, dob) || `PENDING-ROW-${idx}`;
           aNumberStatus = 'invalid';
           invalidANumbers++;
-          aNumberIssues.push({
-            row: idx + 2,
-            name: `${firstName} ${lastName}`,
-            issue: `Invalid A#: "${rawANumber}" (${aNumberResult.issue})`,
-            fallbackId: clientId
+          reports.push({
+            type: 'warning',
+            message: `Row ${idx + 2} (${firstName} ${lastName}): Invalid A# "${rawANumber}"`
           });
         }
 
         const record = {
-          _source: 'bahr',
-          _idx: idx,
+          _nameKey: nameKey,
           _clientId: clientId,
           _aNumberStatus: aNumberStatus,
-          _rawANumber: rawANumber,
           lastName,
           firstName,
           middleName,
@@ -509,234 +360,49 @@ function ClioAirtableMerger() {
           entryDate: row['22. Date of Last Arrival into United States'] || '',
           placeOfEntry: row['23. Place of Last Arrival to US'] || '',
           dob: dob,
+          clioContactId: '', // Will be populated from Clio Contacts
         };
 
         bahrLookup.set(nameKey, record);
-        clientIdLookup.set(clientId, record);
-
-        // Only add to A# lookup if valid
-        if (aNumberResult.isValid) {
-          aNumberLookup.set(aNumberResult.normalized, record);
-        }
       });
     }
 
-    // Report A# validation results
     reports.push({ type: 'info', message: `Loaded ${bahrLookup.size} clients from Bahr dataset` });
     reports.push({
       type: validANumbers === bahrLookup.size ? 'success' : 'warning',
       message: `A# Validation: ${validANumbers} valid, ${invalidANumbers} malformed, ${missingANumbers} missing`
     });
 
-    // Add individual A# issues to report
-    aNumberIssues.forEach(issue => {
-      reports.push({
-        type: 'error',
-        message: `Row ${issue.row} (${issue.name}): ${issue.issue} → ${issue.fallbackId}`
-      });
-    });
-
-    // Step 2: Enrich with Clio Contacts (match by name)
+    // Enrich with Clio Contacts
     let contactMatches = 0;
     let contactMisses = 0;
 
-    if (parsedData.contacts?.rows) {
-      parsedData.contacts.rows.forEach((row) => {
+    if (phase1Data.clioContacts?.rows) {
+      phase1Data.clioContacts.rows.forEach((row) => {
         const lastName = row['Last Name'] || '';
         const firstName = row['First Name'] || '';
         const nameKey = normalizeName(lastName, firstName);
 
         if (bahrLookup.has(nameKey)) {
           const record = bahrLookup.get(nameKey);
-          // Enrich with Clio contact data (prefer Clio if Bahr is empty)
           if (!record.phone && row['Mobile Phone']) record.phone = row['Mobile Phone'];
           if (!record.phone && row['Primary Phone']) record.phone = row['Primary Phone'];
           if (!record.email && row['E-mail Address']) record.email = row['E-mail Address'];
-          record._clioContactId = row['UniqueId'] || '';
+          record.clioContactId = row['UniqueId'] || '';
           contactMatches++;
         } else {
           contactMisses++;
-          reports.push({ type: 'warning', message: `Clio contact not in Bahr: ${firstName} ${lastName}` });
         }
       });
+
+      reports.push({ type: 'info', message: `Matched ${contactMatches} Clio contacts, ${contactMisses} unmatched` });
     }
 
-    reports.push({ type: 'info', message: `Matched ${contactMatches} Clio contacts, ${contactMisses} unmatched` });
-
-    // Step 3: Parse Events
-    const eventsOutput = [];
-    let eventMatches = 0;
-    let eventSkipped = 0;
-    let eventsWithoutDateTime = 0;
-
-    if (parsedData.events?.rows) {
-      parsedData.events.rows.forEach((row) => {
-        const summary = row['summary'] || '';
-        const description = row['description'] || '';
-        const startDateTime = row['start.dateTime'] || '';
-        const location = row['location'] || '';
-
-        const summaryParsed = parseEventSummary(summary);
-        const descParsed = parseEventDescription(description);
-
-        // CRITICAL: Skip events without A# (cannot be linked to clients)
-        const eventANumber = summaryParsed.aNumber;
-        if (!eventANumber) {
-          eventSkipped++;
-          reports.push({ type: 'warning', message: `Event SKIPPED (no A#): ${summary.slice(0, 60)}...` });
-          return; // Skip this row entirely
-        }
-
-        // Validate datetime exists
-        if (!startDateTime) {
-          eventsWithoutDateTime++;
-          reports.push({ type: 'warning', message: `Event missing datetime: ${summary.slice(0, 60)}...` });
-        }
-
-        // Try to match client by A# in Bahr dataset
-        let matchedClient = null;
-        if (aNumberLookup.has(eventANumber)) {
-          matchedClient = aNumberLookup.get(eventANumber);
-          eventMatches++;
-        } else {
-          // A# found in summary but not in Bahr dataset - still output for linking
-          reports.push({ type: 'info', message: `Event A# ${eventANumber} not in Bahr dataset (will import as new client)` });
-        }
-
-        // Check for conference data (Webex/Telephonic)
-        const hasWebex = (row['conferenceData.conferenceSolution.name'] || '').toLowerCase().includes('webex') ||
-                        (row['conferenceData.entryPoints.0.uri'] || '').includes('webex');
-        const hasTelephonic = (row['conferenceData.entryPoints.1.entryPointType'] || '') === 'phone';
-
-        // Use location field for court, fallback to parsed court code
-        const court = location || descParsed.courtAddress || summaryParsed.court;
-
-        eventsOutput.push({
-          'Client ID': matchedClient?._clientId || eventANumber, // Link key (A# or fallback)
-          'A#': eventANumber, // A# from event (for reference)
-          'Hearing Date/Time': startDateTime,
-          'Event Type': 'Hearing',
-          'Event Hearing Type': mapHearingType(summaryParsed.hearingType),
-          'Court': court,
-          'Judge': descParsed.judge,
-          'Webex': hasWebex ? 'TRUE' : 'FALSE',
-          'Telephonic': hasTelephonic ? 'TRUE' : 'FALSE',
-          '_client_name': matchedClient ? `${matchedClient.lastName}, ${matchedClient.firstName}` : summaryParsed.clientName,
-          '_status': summaryParsed.status,
-          '_matter_id': summaryParsed.matterId,
-          '_riders': descParsed.riders.map(r => `${r.name}|${r.aNumber}`).join('; '),
-        });
-      });
-    }
-
-    reports.push({
-      type: 'info',
-      message: `Events: ${eventsOutput.length} output, ${eventMatches} matched to Bahr, ${eventSkipped} skipped (no A#), ${eventsWithoutDateTime} missing datetime`
-    });
-
-    // Step 4: Parse Matter Notes - Aggregate by client
-    const notesByClient = new Map(); // A# -> array of notes
-    let noteMatches = 0;
-    let noteMisses = 0;
-
-    if (parsedData.matterNotes?.rows) {
-      parsedData.matterNotes.rows.forEach((row) => {
-        const matter = row['Matter'] || '';
-        const subject = row['Subject'] || '';
-        const detail = row['Detail'] || '';
-        const date = row['Date'] || row['CreatedAt'] || '';
-        const creator = row['Creator'] || '';
-        const matterId = row['MatterId'] || '';
-
-        const matterParsed = parseMatterField(matter);
-
-        // Try to match by last name (partial match)
-        let matchedClient = null;
-        for (const [nameKey, record] of bahrLookup) {
-          if (nameKey.startsWith(matterParsed.lastName + '|') ||
-              nameKey.includes(matterParsed.lastName)) {
-            matchedClient = record;
-            break;
-          }
-        }
-
-        if (!matchedClient) {
-          noteMisses++;
-          reports.push({ type: 'warning', message: `Matter note not matched: ${matter}` });
-          return; // Skip unmatched notes
-        }
-
-        noteMatches++;
-        const clientKey = matchedClient.aNumber || `NAME:${matchedClient.lastName}|${matchedClient.firstName}`;
-
-        if (!notesByClient.has(clientKey)) {
-          notesByClient.set(clientKey, {
-            client: matchedClient,
-            matterId: matterId,
-            matter: matter,
-            notes: []
-          });
-        }
-
-        notesByClient.get(clientKey).notes.push({
-          date: date,
-          subject: subject,
-          creator: creator,
-          detail: detail,
-        });
-      });
-    }
-
-    // Format aggregated notes for each client (newest first)
-    const caseMasterOutput = [];
-
-    notesByClient.forEach((clientData, clientKey) => {
-      // Sort notes by date descending (newest first)
-      const sortedNotes = clientData.notes.sort((a, b) => {
-        const dateA = new Date(a.date || 0);
-        const dateB = new Date(b.date || 0);
-        return dateB - dateA; // Descending
-      });
-
-      // Format notes into a single text block
-      const formattedNotes = sortedNotes.map((note, idx) => {
-        const datePart = note.date ? `[${note.date}]` : '[No Date]';
-        const subjectPart = note.subject ? ` - ${note.subject}` : '';
-        const creatorPart = note.creator ? `\nBy: ${note.creator}` : '';
-        const separator = '─'.repeat(50);
-
-        return `${'═'.repeat(55)}
-${datePart}${subjectPart}${creatorPart}
-${separator}
-${note.detail || '(No content)'}`;
-      }).join('\n\n');
-
-      caseMasterOutput.push({
-        'Client ID': clientData.client._clientId || clientData.client.aNumber || '', // Link key
-        'A#': clientData.client.aNumber || '', // Valid A# only
-        'Case Notes': formattedNotes,
-        'PP ID': clientData.matterId,
-        '_client_name': `${clientData.client.lastName}, ${clientData.client.firstName}`,
-        '_matter': clientData.matter,
-        '_note_count': sortedNotes.length,
-      });
-    });
-
-    reports.push({ type: 'info', message: `Aggregated ${noteMatches} notes into ${caseMasterOutput.length} case records, ${noteMisses} notes unmatched` });
-
-    // Step 5: Build Client Info output
-    const clientsOutput = [];
+    // Build output
     bahrLookup.forEach((record) => {
-      // Validate country against allowed options
-      let country = record.country;
-      if (country && !AIRTABLE_OPTIONS.country.some(c => c.toLowerCase() === country.toLowerCase())) {
-        reports.push({ type: 'warning', message: `Unknown country: ${country} for ${record.firstName} ${record.lastName}` });
-      }
-
       clientsOutput.push({
-        'Client ID': record._clientId, // Universal ID (A# or fallback)
-        'A#': record.aNumber, // Valid A# only (empty if pending)
-        'A# Status': record._aNumberStatus, // 'valid', 'invalid', or 'missing'
+        'Client ID': record._clientId,
+        'A#': record.aNumber,
         'First Name': record.firstName,
         'Middle Name': record.middleName,
         'Family Name': record.lastName,
@@ -745,104 +411,306 @@ ${note.detail || '(No content)'}`;
         'Address Line 1': record.addressLine1,
         'Address Line 2': record.addressLine2,
         'City': record.city,
+        'State': record.state,
         'Zip (5)': record.zip,
-        'Country': country,
+        'Country': record.country,
         'Entry Date': record.entryDate,
         'Place of Entry': record.placeOfEntry,
         'DOB': record.dob,
-        '_raw_a_number': record._rawANumber, // Original value from Bahr for debugging
+        'clio_contact_id': record.clioContactId,
+        'ICH Atty': ANDREW_BAHR_RECORD_ID,
+        'Bahr Client': 'TRUE',
       });
     });
 
-    // Generate linking script
-    const linkingScript = `
-// Airtable Scripting Extension - Link Records by Client ID
-// Run this AFTER importing all three CSVs
-//
-// Client ID = A# (XXX-XXX-XXX) for clients with valid A#
-//           = PENDING-LASTNAME-FIRSTNAME-DOB for clients without A#
-//
-// This allows linking even for clients awaiting A# assignment
+    setPhase1Result({ clients: clientsOutput });
+    setPhase1Report(reports);
+  }, [phase1Data]);
 
-const clientsTable = base.getTable('Client Info');
-const eventsTable = base.getTable('Events');
-const caseMasterTable = base.getTable('Case Master View // Activities');
+  // Phase 2: Case Master Views
+  const runPhase2 = useCallback(() => {
+    const reports = [];
 
-// Build Client ID -> Record ID lookup from Client Info
-const clientRecords = await clientsTable.selectRecordsAsync({ fields: ['Client ID', 'A#', 'A# Status'] });
-const clientIdToRecordId = new Map();
-let pendingCount = 0;
+    // Build clio_contact_id -> Airtable Record ID lookup from Airtable export
+    const clioContactToRecordId = new Map();
+    const clientIdToRecordId = new Map();
 
-for (const record of clientRecords.records) {
-  const clientId = record.getCellValueAsString('Client ID');
-  const aNumStatus = record.getCellValueAsString('A# Status');
+    if (phase2Data.airtableClients?.rows) {
+      phase2Data.airtableClients.rows.forEach((row) => {
+        const recordId = row['Record ID'] || row['recordId'] || row['Airtable Record ID'] || '';
+        const clioContactId = row['clio_contact_id'] || '';
+        const clientId = row['Client ID'] || row['A#'] || '';
 
-  if (clientId) {
-    clientIdToRecordId.set(clientId, record.id);
-    if (aNumStatus !== 'valid') pendingCount++;
-  }
-}
+        if (clioContactId && recordId) {
+          clioContactToRecordId.set(clioContactId, recordId);
+        }
+        if (clientId && recordId) {
+          clientIdToRecordId.set(clientId, recordId);
+        }
+      });
+      reports.push({ type: 'info', message: `Loaded ${clioContactToRecordId.size} clio_contact_id mappings from Airtable export` });
+    }
 
-console.log(\`Loaded \${clientIdToRecordId.size} clients (\${pendingCount} with pending/invalid A#)\`);
+    // Build MatterId -> Matter info lookup from Clio Matters
+    const mattersLookup = new Map();
 
-// Link Events to Clients by Client ID
-const eventRecords = await eventsTable.selectRecordsAsync({ fields: ['Client ID', 'A#', 'Client'] });
-let linkedEvents = 0;
-let failedEvents = 0;
+    if (phase2Data.clioMatters?.rows) {
+      phase2Data.clioMatters.rows.forEach((row) => {
+        const matterId = row['UniqueId'] || '';
+        const clientId = row['ClientId'] || '';
+        const displayNumber = row['DisplayNumber'] || '';
+        const description = row['Description'] || '';
+        const client = row['Client'] || '';
+        const status = row['Status'] || '';
+        const openDate = row['OpenDate'] || '';
+        const closeDate = row['CloseDate'] || '';
 
-for (const record of eventRecords.records) {
-  const clientId = record.getCellValueAsString('Client ID');
-  const existingClient = record.getCellValue('Client');
+        if (matterId) {
+          mattersLookup.set(matterId, {
+            matterId,
+            clientId, // This is the clio_contact_id
+            displayNumber,
+            description,
+            clientName: client,
+            status,
+            openDate,
+            closeDate,
+            notes: [],
+          });
+        }
+      });
+      reports.push({ type: 'info', message: `Loaded ${mattersLookup.size} matters from Clio Matters` });
+    }
 
-  if (clientId && !existingClient && clientIdToRecordId.has(clientId)) {
-    await eventsTable.updateRecordAsync(record.id, {
-      'Client': [{ id: clientIdToRecordId.get(clientId) }]
+    // Aggregate notes by MatterId
+    let notesMatched = 0;
+    let notesUnmatched = 0;
+
+    if (phase2Data.clioNotes?.rows) {
+      phase2Data.clioNotes.rows.forEach((row) => {
+        const matterId = row['MatterId'] || '';
+        const subject = row['Subject'] || '';
+        const detail = row['Detail'] || '';
+        const date = row['Date'] || row['CreatedAt'] || '';
+        const creator = row['Creator'] || '';
+
+        if (mattersLookup.has(matterId)) {
+          mattersLookup.get(matterId).notes.push({ date, subject, detail, creator });
+          notesMatched++;
+        } else {
+          notesUnmatched++;
+        }
+      });
+      reports.push({ type: 'info', message: `Matched ${notesMatched} notes, ${notesUnmatched} unmatched` });
+    }
+
+    // Build Case Master View output
+    const caseMasterOutput = [];
+    let linkedCount = 0;
+    let unlinkedCount = 0;
+
+    mattersLookup.forEach((matter) => {
+      // Find Airtable Record ID for this client
+      const clientRecordId = clioContactToRecordId.get(matter.clientId) || '';
+
+      if (clientRecordId) {
+        linkedCount++;
+      } else {
+        unlinkedCount++;
+        reports.push({ type: 'warning', message: `Matter ${matter.displayNumber} - client not found in Airtable export (ClientId: ${matter.clientId})` });
+      }
+
+      // Sort notes by date descending and format
+      const sortedNotes = matter.notes.sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0));
+
+      const formattedNotes = sortedNotes.map((note) => {
+        const datePart = note.date ? `[${note.date}]` : '[No Date]';
+        const subjectPart = note.subject ? ` - ${note.subject}` : '';
+        const creatorPart = note.creator ? `\nBy: ${note.creator}` : '';
+        return `${'═'.repeat(55)}\n${datePart}${subjectPart}${creatorPart}\n${'─'.repeat(50)}\n${note.detail || '(No content)'}`;
+      }).join('\n\n');
+
+      caseMasterOutput.push({
+        'Client': clientRecordId, // Airtable link field
+        'clio_matter_id': matter.matterId,
+        'PP ID': matter.displayNumber,
+        'Description': matter.description,
+        'File Case Status': matter.status === 'Open' ? 'Active' : matter.status,
+        'Case Notes': formattedNotes,
+        'Bahr Client': 'TRUE',
+        '_client_name': matter.clientName,
+        '_note_count': sortedNotes.length,
+      });
     });
-    linkedEvents++;
-  } else if (clientId && !clientIdToRecordId.has(clientId)) {
-    failedEvents++;
-    console.log(\`No client found for Client ID: \${clientId}\`);
-  }
-}
 
-console.log(\`Linked \${linkedEvents} events, \${failedEvents} failed\`);
+    reports.push({ type: 'info', message: `Generated ${caseMasterOutput.length} Case Master Views (${linkedCount} linked, ${unlinkedCount} unlinked)` });
 
-// Link Case Master View to Clients by Client ID
-const caseRecords = await caseMasterTable.selectRecordsAsync({ fields: ['Client ID', 'A#', 'Contact'] });
-let linkedCases = 0;
-let failedCases = 0;
+    setPhase2Result({ caseMaster: caseMasterOutput });
+    setPhase2Report(reports);
+  }, [phase2Data]);
 
-for (const record of caseRecords.records) {
-  const clientId = record.getCellValueAsString('Client ID');
-  const existingContact = record.getCellValue('Contact');
+  // Phase 3: Events & Relationships
+  const runPhase3 = useCallback(() => {
+    const reports = [];
 
-  if (clientId && !existingContact && clientIdToRecordId.has(clientId)) {
-    await caseMasterTable.updateRecordAsync(record.id, {
-      'Contact': [{ id: clientIdToRecordId.get(clientId) }]
-    });
-    linkedCases++;
-  } else if (clientId && !clientIdToRecordId.has(clientId)) {
-    failedCases++;
-    console.log(\`No client found for Client ID: \${clientId}\`);
-  }
-}
+    // Build lookups from Airtable exports
+    const clioContactToRecordId = new Map();
+    const clioMatterToRecordId = new Map();
+    const displayNumberToRecordId = new Map();
 
-console.log(\`Linked \${linkedCases} case records, \${failedCases} failed\`);
-console.log('Done!');
-console.log('NOTE: Clients with A# Status "missing" or "invalid" need A# lookup.');
-console.log('Once you have the A#, update the Client ID column to match.');
-`;
+    if (phase3Data.airtableClients?.rows) {
+      phase3Data.airtableClients.rows.forEach((row) => {
+        const recordId = row['Record ID'] || row['recordId'] || '';
+        const clioContactId = row['clio_contact_id'] || '';
+        if (clioContactId && recordId) {
+          clioContactToRecordId.set(clioContactId, recordId);
+        }
+      });
+      reports.push({ type: 'info', message: `Loaded ${clioContactToRecordId.size} client mappings` });
+    }
 
-    setMergeResult({
-      clients: clientsOutput,
-      events: eventsOutput,
-      caseMaster: caseMasterOutput,
-      linkingScript,
-    });
+    if (phase3Data.airtableCaseMaster?.rows) {
+      phase3Data.airtableCaseMaster.rows.forEach((row) => {
+        const recordId = row['Record ID'] || row['recordId'] || '';
+        const clioMatterId = row['clio_matter_id'] || '';
+        const displayNumber = row['PP ID'] || '';
 
-    setValidationReport(reports);
-    setActiveTab('results');
-  }, [parsedData]);
+        if (clioMatterId && recordId) {
+          clioMatterToRecordId.set(clioMatterId, recordId);
+        }
+        if (displayNumber && recordId) {
+          // Extract just the number part for matching (e.g., "00006" from "00006-Hernandez")
+          const numMatch = displayNumber.match(/^(\d+)/);
+          if (numMatch) {
+            displayNumberToRecordId.set(numMatch[1], recordId);
+          }
+          displayNumberToRecordId.set(displayNumber, recordId);
+        }
+      });
+      reports.push({ type: 'info', message: `Loaded ${clioMatterToRecordId.size} case master mappings` });
+    }
+
+    // Process Events
+    const eventsOutput = [];
+    let eventsLinked = 0;
+    let eventsUnlinked = 0;
+
+    if (phase3Data.clioEvents?.rows) {
+      phase3Data.clioEvents.rows.forEach((row) => {
+        const summary = row['summary'] || '';
+        const description = row['description'] || '';
+        const startDateTime = row['start.dateTime'] || '';
+        const location = row['location'] || '';
+
+        const summaryParsed = parseEventSummary(summary);
+        const descParsed = parseEventDescription(description);
+
+        // Skip events without A#
+        if (!summaryParsed.aNumber) {
+          reports.push({ type: 'warning', message: `Event skipped (no A#): ${summary.slice(0, 50)}...` });
+          return;
+        }
+
+        // Try to find Case Master View by matter ID from summary
+        let caseMasterRecordId = '';
+        if (summaryParsed.matterId) {
+          // Try full match first
+          caseMasterRecordId = displayNumberToRecordId.get(summaryParsed.matterId) || '';
+
+          // Try just the number part
+          if (!caseMasterRecordId) {
+            const numMatch = summaryParsed.matterId.match(/^(\d+)/);
+            if (numMatch) {
+              caseMasterRecordId = displayNumberToRecordId.get(numMatch[1]) || '';
+            }
+          }
+        }
+
+        if (caseMasterRecordId) {
+          eventsLinked++;
+        } else {
+          eventsUnlinked++;
+          reports.push({ type: 'warning', message: `Event not linked to Case Master: ${summaryParsed.matterId || 'no matter ID'}` });
+        }
+
+        const court = location || descParsed.courtAddress || '';
+
+        eventsOutput.push({
+          'Case Master': caseMasterRecordId, // Link to Case Master View
+          'A#': summaryParsed.aNumber,
+          'Hearing Date/Time': startDateTime,
+          'Event Type': 'Hearing',
+          'Event Hearing Type': mapHearingType(summaryParsed.hearingType),
+          'Court': court,
+          'Judge': descParsed.judge,
+          'MCH Attny': ANDREW_BAHR_RECORD_ID,
+          'Bahr Client': 'TRUE',
+          '_summary': summary.slice(0, 100),
+        });
+      });
+
+      reports.push({ type: 'info', message: `Processed ${eventsOutput.length} events (${eventsLinked} linked, ${eventsUnlinked} unlinked)` });
+    }
+
+    // Process Relationships
+    const relationshipsOutput = [];
+    let relsLinked = 0;
+    let relsUnlinked = 0;
+
+    if (phase3Data.clioRelationships?.rows) {
+      phase3Data.clioRelationships.rows.forEach((row) => {
+        const relationshipDesc = row['RelationshipDescription'] || '';
+        const contactId = row['ContactId'] || ''; // Object client (the related person)
+        const matterId = row['MatterId'] || '';
+        const contactName = row['Contact'] || '';
+
+        // Find the subject client (primary client on the matter) - we need to look this up from the matter
+        // For now, we'll use the Case Master View link
+        const caseMasterRecordId = clioMatterToRecordId.get(matterId) || '';
+        const objectClientRecordId = clioContactToRecordId.get(contactId) || '';
+
+        if (caseMasterRecordId && objectClientRecordId) {
+          relsLinked++;
+        } else {
+          relsUnlinked++;
+          if (!caseMasterRecordId) {
+            reports.push({ type: 'warning', message: `Relationship: Case Master not found for matter ${matterId}` });
+          }
+          if (!objectClientRecordId) {
+            reports.push({ type: 'warning', message: `Relationship: Object client not found (${contactName}, ID: ${contactId})` });
+          }
+        }
+
+        // Map relationship description to Airtable select options
+        const relationshipMap = {
+          'spouse': 'Spouse',
+          'son': 'Child',
+          'daughter': 'Child',
+          'parent': 'Parent',
+          'mother': 'Parent',
+          'father': 'Parent',
+          'sibling': 'Sibling',
+          'brother': 'Sibling',
+          'sister': 'Sibling',
+        };
+        const relationship = relationshipMap[relationshipDesc.toLowerCase()] || relationshipDesc;
+
+        relationshipsOutput.push({
+          'Case Master View': caseMasterRecordId,
+          'Object Client': objectClientRecordId,
+          'Relationship': relationship,
+          'Bahr Client': 'TRUE',
+          '_contact_name': contactName,
+          '_original_relationship': relationshipDesc,
+        });
+      });
+
+      reports.push({ type: 'info', message: `Processed ${relationshipsOutput.length} relationships (${relsLinked} linked, ${relsUnlinked} unlinked)` });
+    }
+
+    setPhase3Result({ events: eventsOutput, relationships: relationshipsOutput });
+    setPhase3Report(reports);
+  }, [phase3Data]);
 
   const downloadCSV = (data, filename, headers) => {
     const csv = generateCSV(headers, data);
@@ -855,18 +723,6 @@ console.log('Once you have the A#, update the Client ID column to match.');
     URL.revokeObjectURL(url);
   };
 
-  const downloadScript = () => {
-    const blob = new Blob([mergeResult.linkingScript], { type: 'text/javascript' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = 'airtable_link_records.js';
-    a.click();
-    URL.revokeObjectURL(url);
-  };
-
-  const canMerge = parsedData.bahr?.rows?.length > 0;
-
   return (
     <div style={{
       minHeight: '100vh',
@@ -877,9 +733,7 @@ console.log('Once you have the A#, update the Client ID column to match.');
     }}>
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap');
-
         * { box-sizing: border-box; }
-
         .card {
           background: rgba(255, 255, 255, 0.03);
           border: 1px solid rgba(255, 255, 255, 0.08);
@@ -887,26 +741,22 @@ console.log('Once you have the A#, update the Client ID column to match.');
           padding: 1.5rem;
           backdrop-filter: blur(10px);
         }
-
         .upload-zone {
           border: 2px dashed rgba(99, 102, 241, 0.4);
           border-radius: 8px;
-          padding: 2rem;
+          padding: 1.5rem;
           text-align: center;
           cursor: pointer;
           transition: all 0.2s;
         }
-
         .upload-zone:hover {
           border-color: rgba(99, 102, 241, 0.8);
           background: rgba(99, 102, 241, 0.05);
         }
-
         .upload-zone.has-file {
           border-color: #22c55e;
           background: rgba(34, 197, 94, 0.1);
         }
-
         .btn {
           padding: 0.75rem 1.5rem;
           border-radius: 8px;
@@ -917,47 +767,42 @@ console.log('Once you have the A#, update the Client ID column to match.');
           border: none;
           font-family: inherit;
         }
-
         .btn-primary {
           background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
           color: white;
         }
-
         .btn-primary:hover:not(:disabled) {
           transform: translateY(-2px);
           box-shadow: 0 4px 20px rgba(99, 102, 241, 0.4);
         }
-
         .btn-primary:disabled {
           opacity: 0.5;
           cursor: not-allowed;
         }
-
         .btn-secondary {
           background: rgba(255, 255, 255, 0.1);
           color: #e4e4e7;
           border: 1px solid rgba(255, 255, 255, 0.2);
         }
-
         .btn-secondary:hover {
           background: rgba(255, 255, 255, 0.15);
         }
-
-        .tab {
-          padding: 0.5rem 1rem;
+        .phase-tab {
+          padding: 1rem 1.5rem;
           cursor: pointer;
-          border-bottom: 2px solid transparent;
+          border-radius: 8px 8px 0 0;
           transition: all 0.2s;
           color: #a1a1aa;
+          background: rgba(255, 255, 255, 0.02);
+          border: 1px solid transparent;
+          border-bottom: none;
         }
-
-        .tab:hover { color: #e4e4e7; }
-
-        .tab.active {
+        .phase-tab:hover { color: #e4e4e7; }
+        .phase-tab.active {
           color: #6366f1;
-          border-bottom-color: #6366f1;
+          background: rgba(99, 102, 241, 0.1);
+          border-color: rgba(99, 102, 241, 0.3);
         }
-
         .badge {
           display: inline-block;
           padding: 0.25rem 0.5rem;
@@ -965,49 +810,15 @@ console.log('Once you have the A#, update the Client ID column to match.');
           font-size: 0.75rem;
           font-weight: 600;
         }
-
         .badge-info { background: rgba(59, 130, 246, 0.2); color: #60a5fa; }
         .badge-warning { background: rgba(245, 158, 11, 0.2); color: #fbbf24; }
         .badge-error { background: rgba(239, 68, 68, 0.2); color: #f87171; }
         .badge-success { background: rgba(34, 197, 94, 0.2); color: #4ade80; }
-        .badge-invalid { background: rgba(239, 68, 68, 0.2); color: #f87171; }
-        .badge-missing { background: rgba(245, 158, 11, 0.2); color: #fbbf24; }
-        .badge-valid { background: rgba(34, 197, 94, 0.2); color: #4ade80; }
-
-        .table-container {
-          overflow-x: auto;
-          margin-top: 1rem;
-        }
-
-        table {
-          width: 100%;
-          border-collapse: collapse;
-          font-size: 0.8rem;
-        }
-
-        th, td {
-          padding: 0.5rem;
-          text-align: left;
-          border-bottom: 1px solid rgba(255, 255, 255, 0.1);
-        }
-
-        th {
-          background: rgba(99, 102, 241, 0.1);
-          font-weight: 600;
-          color: #a5b4fc;
-        }
-
+        .table-container { overflow-x: auto; margin-top: 1rem; }
+        table { width: 100%; border-collapse: collapse; font-size: 0.8rem; }
+        th, td { padding: 0.5rem; text-align: left; border-bottom: 1px solid rgba(255, 255, 255, 0.1); }
+        th { background: rgba(99, 102, 241, 0.1); font-weight: 600; color: #a5b4fc; }
         td { color: #d4d4d8; }
-
-        pre {
-          background: #0d1117;
-          border: 1px solid rgba(255, 255, 255, 0.1);
-          border-radius: 8px;
-          padding: 1rem;
-          overflow-x: auto;
-          font-size: 0.75rem;
-          color: #7ee787;
-        }
       `}</style>
 
       <div style={{ maxWidth: '1200px', margin: '0 auto' }}>
@@ -1023,293 +834,429 @@ console.log('Once you have the A#, update the Client ID column to match.');
             Clio → Airtable Merger
           </h1>
           <p style={{ color: '#71717a', fontSize: '0.875rem' }}>
-            Transform Clio exports into Airtable-ready CSVs with linked records
+            3-Phase import: Clients → Case Master Views → Events & Relationships
           </p>
         </header>
 
-        {/* Tabs */}
-        <div style={{ display: 'flex', gap: '1rem', marginBottom: '1.5rem', borderBottom: '1px solid rgba(255,255,255,0.1)' }}>
-          <div className={`tab ${activeTab === 'upload' ? 'active' : ''}`} onClick={() => setActiveTab('upload')}>
-            Upload Files
-          </div>
-          <div className={`tab ${activeTab === 'preview' ? 'active' : ''}`} onClick={() => setActiveTab('preview')}>
-            Preview Data
-          </div>
-          <div className={`tab ${activeTab === 'results' ? 'active' : ''}`} onClick={() => setActiveTab('results')}>
-            Results & Export
-          </div>
+        {/* Phase Tabs */}
+        <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '0' }}>
+          {[
+            { num: 1, label: 'Phase 1: Clients', desc: 'Bahr + Clio Contacts' },
+            { num: 2, label: 'Phase 2: Case Master', desc: 'Matters + Notes' },
+            { num: 3, label: 'Phase 3: Events & Relationships', desc: 'Events + Related Contacts' },
+          ].map(({ num, label, desc }) => (
+            <div
+              key={num}
+              className={`phase-tab ${activePhase === num ? 'active' : ''}`}
+              onClick={() => setActivePhase(num)}
+            >
+              <div style={{ fontWeight: 600 }}>{label}</div>
+              <div style={{ fontSize: '0.75rem', color: '#71717a' }}>{desc}</div>
+            </div>
+          ))}
         </div>
 
-        {/* Upload Tab */}
-        {activeTab === 'upload' && (
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '1rem' }}>
-            {[
-              { key: 'bahr', label: 'Bahr Dataset (Authority)', desc: 'Contains A#s and client info', required: true },
-              { key: 'contacts', label: 'Clio Contacts Export', desc: 'Additional contact details', required: false },
-              { key: 'events', label: 'Clio Events Export', desc: 'Hearings from Google Calendar', required: false },
-              { key: 'matterNotes', label: 'Clio Matter Notes', desc: 'Case notes and details', required: false },
-            ].map(({ key, label, desc, required }) => (
-              <div key={key} className="card">
-                <h3 style={{ fontSize: '0.875rem', marginBottom: '0.5rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                  {label}
-                  {required && <span className="badge badge-warning">Required</span>}
-                </h3>
-                <p style={{ fontSize: '0.75rem', color: '#71717a', marginBottom: '1rem' }}>{desc}</p>
+        {/* Phase Content */}
+        <div className="card" style={{ borderTopLeftRadius: 0 }}>
+          {/* Phase 1: Clients */}
+          {activePhase === 1 && (
+            <div>
+              <h2 style={{ marginBottom: '1rem', fontSize: '1.25rem' }}>Phase 1: Client Import</h2>
+              <p style={{ color: '#71717a', marginBottom: '1.5rem', fontSize: '0.875rem' }}>
+                Merge Bahr dataset with Clio Contacts. Output includes <code>clio_contact_id</code>, <code>ICH Atty</code>, and <code>Bahr Client</code> fields.
+              </p>
 
-                <label className={`upload-zone ${files[key] ? 'has-file' : ''}`}>
-                  <input
-                    type="file"
-                    accept=".csv"
-                    onChange={handleFileUpload(key)}
-                    style={{ display: 'none' }}
-                  />
-                  {files[key] ? (
-                    <div>
-                      <span style={{ color: '#22c55e' }}>✓</span> {files[key].name}
-                      <div style={{ fontSize: '0.75rem', color: '#71717a', marginTop: '0.25rem' }}>
-                        {parsedData[key]?.rows?.length || 0} rows
-                      </div>
-                    </div>
-                  ) : (
-                    <div style={{ color: '#71717a' }}>
-                      Drop CSV or click to upload
-                    </div>
-                  )}
-                </label>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '1rem', marginBottom: '1.5rem' }}>
+                {[
+                  { key: 'bahr', label: 'Bahr Dataset', desc: 'Authority source with A# and demographics', required: true },
+                  { key: 'clioContacts', label: 'Clio Contacts Export', desc: 'UniqueId, phone, email', required: true },
+                ].map(({ key, label, desc, required }) => (
+                  <div key={key}>
+                    <h4 style={{ fontSize: '0.875rem', marginBottom: '0.5rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                      {label}
+                      {required && <span className="badge badge-warning">Required</span>}
+                    </h4>
+                    <p style={{ fontSize: '0.75rem', color: '#71717a', marginBottom: '0.5rem' }}>{desc}</p>
+                    <label className={`upload-zone ${phase1Files[key] ? 'has-file' : ''}`}>
+                      <input type="file" accept=".csv" onChange={handleFileUpload(1, key)} style={{ display: 'none' }} />
+                      {phase1Files[key] ? (
+                        <div>
+                          <span style={{ color: '#22c55e' }}>✓</span> {phase1Files[key].name}
+                          <div style={{ fontSize: '0.75rem', color: '#71717a' }}>{phase1Data[key]?.rows?.length || 0} rows</div>
+                        </div>
+                      ) : (
+                        <div style={{ color: '#71717a' }}>Drop CSV or click to upload</div>
+                      )}
+                    </label>
+                  </div>
+                ))}
               </div>
-            ))}
 
-            <div style={{ gridColumn: '1 / -1', textAlign: 'center', marginTop: '1rem' }}>
               <button
                 className="btn btn-primary"
-                onClick={performMerge}
-                disabled={!canMerge}
+                onClick={runPhase1}
+                disabled={!phase1Data.bahr?.rows?.length}
+                style={{ marginBottom: '1.5rem' }}
               >
-                {canMerge ? 'Merge & Transform →' : 'Upload Bahr Dataset to Continue'}
+                Generate clients.csv
               </button>
-            </div>
-          </div>
-        )}
 
-        {/* Preview Tab */}
-        {activeTab === 'preview' && (
-          <div className="card">
-            <h3 style={{ marginBottom: '1rem' }}>Parsed Data Preview</h3>
+              {phase1Report.length > 0 && (
+                <div style={{ marginBottom: '1.5rem' }}>
+                  <h4 style={{ marginBottom: '0.5rem' }}>Validation Report</h4>
+                  <div style={{ maxHeight: '150px', overflowY: 'auto', fontSize: '0.8rem' }}>
+                    {phase1Report.map((item, i) => (
+                      <div key={i} style={{ display: 'flex', gap: '0.5rem', marginBottom: '0.25rem' }}>
+                        <span className={`badge badge-${item.type}`}>{item.type}</span>
+                        <span>{item.message}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
 
-            {Object.entries(parsedData).map(([key, data]) => (
-              data?.rows?.length > 0 && (
-                <div key={key} style={{ marginBottom: '2rem' }}>
-                  <h4 style={{ fontSize: '0.875rem', color: '#a5b4fc', marginBottom: '0.5rem' }}>
-                    {key} ({data.rows.length} rows)
-                  </h4>
+              {phase1Result && (
+                <div>
+                  <button
+                    className="btn btn-secondary"
+                    onClick={() => downloadCSV(
+                      phase1Result.clients,
+                      'phase1_clients.csv',
+                      ['Client ID', 'A#', 'First Name', 'Middle Name', 'Family Name', 'Phone Number', 'Client Email', 'Address Line 1', 'Address Line 2', 'City', 'State', 'Zip (5)', 'Country', 'Entry Date', 'Place of Entry', 'DOB', 'clio_contact_id', 'ICH Atty', 'Bahr Client']
+                    )}
+                  >
+                    Download clients.csv ({phase1Result.clients.length} records)
+                  </button>
+
                   <div className="table-container">
                     <table>
                       <thead>
                         <tr>
-                          {data.headers.slice(0, 8).map((h, i) => (
-                            <th key={i}>{h}</th>
-                          ))}
-                          {data.headers.length > 8 && <th>...</th>}
+                          <th>Client ID</th>
+                          <th>A#</th>
+                          <th>Name</th>
+                          <th>clio_contact_id</th>
+                          <th>ICH Atty</th>
                         </tr>
                       </thead>
                       <tbody>
-                        {data.rows.slice(0, 5).map((row, i) => (
+                        {phase1Result.clients.slice(0, 5).map((row, i) => (
                           <tr key={i}>
-                            {data.headers.slice(0, 8).map((h, j) => (
-                              <td key={j}>{String(row[h] || '').slice(0, 30)}</td>
-                            ))}
-                            {data.headers.length > 8 && <td>...</td>}
+                            <td style={{ fontFamily: 'monospace', fontSize: '0.7rem' }}>{row['Client ID']}</td>
+                            <td>{row['A#'] || '—'}</td>
+                            <td>{row['First Name']} {row['Family Name']}</td>
+                            <td style={{ fontFamily: 'monospace', fontSize: '0.7rem' }}>{row['clio_contact_id'] || '—'}</td>
+                            <td style={{ fontFamily: 'monospace', fontSize: '0.7rem' }}>{row['ICH Atty'].slice(0, 10)}...</td>
                           </tr>
                         ))}
                       </tbody>
                     </table>
                   </div>
+
+                  <div style={{ marginTop: '1.5rem', padding: '1rem', background: 'rgba(34, 197, 94, 0.1)', borderRadius: '8px', border: '1px solid rgba(34, 197, 94, 0.3)' }}>
+                    <h4 style={{ color: '#4ade80', marginBottom: '0.5rem' }}>Next Steps</h4>
+                    <ol style={{ fontSize: '0.875rem', color: '#a1a1aa', paddingLeft: '1.25rem' }}>
+                      <li>Import <code>phase1_clients.csv</code> to Airtable Client Info table</li>
+                      <li>Export Client Info table (include Record ID and clio_contact_id columns)</li>
+                      <li>Proceed to Phase 2 with the export</li>
+                    </ol>
+                  </div>
                 </div>
-              )
-            ))}
+              )}
+            </div>
+          )}
 
-            {!Object.values(parsedData).some(d => d?.rows?.length > 0) && (
-              <p style={{ color: '#71717a', textAlign: 'center' }}>No data uploaded yet</p>
-            )}
-          </div>
-        )}
+          {/* Phase 2: Case Master Views */}
+          {activePhase === 2 && (
+            <div>
+              <h2 style={{ marginBottom: '1rem', fontSize: '1.25rem' }}>Phase 2: Case Master Views</h2>
+              <p style={{ color: '#71717a', marginBottom: '1.5rem', fontSize: '0.875rem' }}>
+                Create Case Master Views from Clio Matters with aggregated notes. Links to Clients via Airtable Record ID.
+              </p>
 
-        {/* Results Tab */}
-        {activeTab === 'results' && mergeResult && (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-            {/* Validation Report */}
-            <div className="card">
-              <h3 style={{ marginBottom: '1rem' }}>Validation Report</h3>
-              <div style={{ maxHeight: '200px', overflowY: 'auto' }}>
-                {validationReport.map((item, i) => (
-                  <div key={i} style={{ display: 'flex', gap: '0.5rem', marginBottom: '0.5rem', fontSize: '0.8rem' }}>
-                    <span className={`badge badge-${item.type}`}>{item.type}</span>
-                    <span>{item.message}</span>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '1rem', marginBottom: '1.5rem' }}>
+                {[
+                  { key: 'airtableClients', label: 'Airtable Client Export', desc: 'Must include Record ID and clio_contact_id', required: true },
+                  { key: 'clioMatters', label: 'Clio Matters Export', desc: 'UniqueId, ClientId, DisplayNumber', required: true },
+                  { key: 'clioNotes', label: 'Clio Matter Notes', desc: 'MatterId, Subject, Detail, Date', required: false },
+                ].map(({ key, label, desc, required }) => (
+                  <div key={key}>
+                    <h4 style={{ fontSize: '0.875rem', marginBottom: '0.5rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                      {label}
+                      {required && <span className="badge badge-warning">Required</span>}
+                    </h4>
+                    <p style={{ fontSize: '0.75rem', color: '#71717a', marginBottom: '0.5rem' }}>{desc}</p>
+                    <label className={`upload-zone ${phase2Files[key] ? 'has-file' : ''}`}>
+                      <input type="file" accept=".csv" onChange={handleFileUpload(2, key)} style={{ display: 'none' }} />
+                      {phase2Files[key] ? (
+                        <div>
+                          <span style={{ color: '#22c55e' }}>✓</span> {phase2Files[key].name}
+                          <div style={{ fontSize: '0.75rem', color: '#71717a' }}>{phase2Data[key]?.rows?.length || 0} rows</div>
+                        </div>
+                      ) : (
+                        <div style={{ color: '#71717a' }}>Drop CSV or click</div>
+                      )}
+                    </label>
                   </div>
                 ))}
               </div>
-            </div>
 
-            {/* Download Buttons */}
-            <div className="card">
-              <h3 style={{ marginBottom: '1rem' }}>Download Outputs</h3>
-              <p style={{ fontSize: '0.8rem', color: '#71717a', marginBottom: '1rem' }}>
-                Import in order: 1) Clients → 2) Events → 3) Case Master → 4) Run Linking Script
+              <button
+                className="btn btn-primary"
+                onClick={runPhase2}
+                disabled={!phase2Data.airtableClients?.rows?.length || !phase2Data.clioMatters?.rows?.length}
+                style={{ marginBottom: '1.5rem' }}
+              >
+                Generate case_master_views.csv
+              </button>
+
+              {phase2Report.length > 0 && (
+                <div style={{ marginBottom: '1.5rem' }}>
+                  <h4 style={{ marginBottom: '0.5rem' }}>Validation Report</h4>
+                  <div style={{ maxHeight: '150px', overflowY: 'auto', fontSize: '0.8rem' }}>
+                    {phase2Report.map((item, i) => (
+                      <div key={i} style={{ display: 'flex', gap: '0.5rem', marginBottom: '0.25rem' }}>
+                        <span className={`badge badge-${item.type}`}>{item.type}</span>
+                        <span>{item.message}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {phase2Result && (
+                <div>
+                  <button
+                    className="btn btn-secondary"
+                    onClick={() => downloadCSV(
+                      phase2Result.caseMaster,
+                      'phase2_case_master_views.csv',
+                      ['Client', 'clio_matter_id', 'PP ID', 'Description', 'File Case Status', 'Case Notes', 'Bahr Client', '_client_name', '_note_count']
+                    )}
+                  >
+                    Download case_master_views.csv ({phase2Result.caseMaster.length} records)
+                  </button>
+
+                  <div className="table-container">
+                    <table>
+                      <thead>
+                        <tr>
+                          <th>Client (Record ID)</th>
+                          <th>PP ID</th>
+                          <th>Description</th>
+                          <th>Notes</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {phase2Result.caseMaster.slice(0, 5).map((row, i) => (
+                          <tr key={i}>
+                            <td style={{ fontFamily: 'monospace', fontSize: '0.7rem' }}>{row['Client'] ? row['Client'].slice(0, 12) + '...' : '—'}</td>
+                            <td>{row['PP ID']}</td>
+                            <td>{row['Description']?.slice(0, 30)}</td>
+                            <td>{row['_note_count']} notes</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+
+                  <div style={{ marginTop: '1.5rem', padding: '1rem', background: 'rgba(34, 197, 94, 0.1)', borderRadius: '8px', border: '1px solid rgba(34, 197, 94, 0.3)' }}>
+                    <h4 style={{ color: '#4ade80', marginBottom: '0.5rem' }}>Next Steps</h4>
+                    <ol style={{ fontSize: '0.875rem', color: '#a1a1aa', paddingLeft: '1.25rem' }}>
+                      <li>Import <code>phase2_case_master_views.csv</code> to Airtable Case Master View table</li>
+                      <li>Export Case Master View table (include Record ID and clio_matter_id columns)</li>
+                      <li>Proceed to Phase 3 with both exports</li>
+                    </ol>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Phase 3: Events & Relationships */}
+          {activePhase === 3 && (
+            <div>
+              <h2 style={{ marginBottom: '1rem', fontSize: '1.25rem' }}>Phase 3: Events & Relationships</h2>
+              <p style={{ color: '#71717a', marginBottom: '1.5rem', fontSize: '0.875rem' }}>
+                Create Events linked to Case Master Views, and Relationships between clients.
               </p>
 
-              <div style={{ display: 'flex', gap: '1rem', flexWrap: 'wrap' }}>
-                <button
-                  className="btn btn-secondary"
-                  onClick={() => downloadCSV(
-                    mergeResult.clients,
-                    'clients_for_airtable.csv',
-                    ['Client ID', 'A#', 'A# Status', 'First Name', 'Middle Name', 'Family Name', 'Phone Number', 'Client Email', 'Address Line 1', 'Address Line 2', 'City', 'Zip (5)', 'Country', 'Entry Date', 'Place of Entry', 'DOB', '_raw_a_number']
-                  )}
-                >
-                  1. Clients CSV ({mergeResult.clients.length})
-                </button>
-
-                <button
-                  className="btn btn-secondary"
-                  onClick={() => downloadCSV(
-                    mergeResult.events,
-                    'events_for_airtable.csv',
-                    ['Client ID', 'A#', 'Hearing Date/Time', 'Event Type', 'Event Hearing Type', 'Court', 'Judge', 'Webex', 'Telephonic', '_client_name', '_status', '_matter_id', '_riders']
-                  )}
-                >
-                  2. Events CSV ({mergeResult.events.length})
-                </button>
-
-                <button
-                  className="btn btn-secondary"
-                  onClick={() => downloadCSV(
-                    mergeResult.caseMaster,
-                    'case_master_for_airtable.csv',
-                    ['Client ID', 'A#', 'Case Notes', 'PP ID', '_client_name', '_matter', '_note_count']
-                  )}
-                >
-                  3. Case Master CSV ({mergeResult.caseMaster.length} clients)
-                </button>
-
-                <button
-                  className="btn btn-primary"
-                  onClick={downloadScript}
-                >
-                  4. Linking Script (.js)
-                </button>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '1rem', marginBottom: '1.5rem' }}>
+                {[
+                  { key: 'airtableClients', label: 'Airtable Client Export', desc: 'Record ID + clio_contact_id', required: true },
+                  { key: 'airtableCaseMaster', label: 'Airtable Case Master Export', desc: 'Record ID + clio_matter_id + PP ID', required: true },
+                  { key: 'clioEvents', label: 'Clio Events Export', desc: 'Google Calendar events', required: false },
+                  { key: 'clioRelationships', label: 'Clio Contact Related Matters', desc: 'ContactId, MatterId, RelationshipDescription', required: false },
+                ].map(({ key, label, desc, required }) => (
+                  <div key={key}>
+                    <h4 style={{ fontSize: '0.875rem', marginBottom: '0.5rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                      {label}
+                      {required && <span className="badge badge-warning">Required</span>}
+                    </h4>
+                    <p style={{ fontSize: '0.75rem', color: '#71717a', marginBottom: '0.5rem' }}>{desc}</p>
+                    <label className={`upload-zone ${phase3Files[key] ? 'has-file' : ''}`}>
+                      <input type="file" accept=".csv" onChange={handleFileUpload(3, key)} style={{ display: 'none' }} />
+                      {phase3Files[key] ? (
+                        <div>
+                          <span style={{ color: '#22c55e' }}>✓</span> {phase3Files[key].name}
+                          <div style={{ fontSize: '0.75rem', color: '#71717a' }}>{phase3Data[key]?.rows?.length || 0} rows</div>
+                        </div>
+                      ) : (
+                        <div style={{ color: '#71717a' }}>Drop CSV or click</div>
+                      )}
+                    </label>
+                  </div>
+                ))}
               </div>
-            </div>
 
-            {/* Preview Tables */}
-            <div className="card">
-              <h3 style={{ marginBottom: '1rem' }}>Clients Preview</h3>
-              <div className="table-container">
-                <table>
-                  <thead>
-                    <tr>
-                      <th>Client ID</th>
-                      <th>A#</th>
-                      <th>Status</th>
-                      <th>Name</th>
-                      <th>Phone</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {mergeResult.clients.slice(0, 10).map((row, i) => (
-                      <tr key={i} style={{ background: row['A# Status'] !== 'valid' ? 'rgba(239, 68, 68, 0.1)' : 'transparent' }}>
-                        <td style={{ fontFamily: 'monospace', fontSize: '0.75rem' }}>{row['Client ID']}</td>
-                        <td>{row['A#'] || '—'}</td>
-                        <td>
-                          <span className={`badge badge-${row['A# Status'] === 'valid' ? 'success' : 'error'}`}>
-                            {row['A# Status']}
-                          </span>
-                        </td>
-                        <td>{row['First Name']} {row['Family Name']}</td>
-                        <td>{row['Phone Number']}</td>
-                      </tr>
+              <button
+                className="btn btn-primary"
+                onClick={runPhase3}
+                disabled={!phase3Data.airtableClients?.rows?.length || !phase3Data.airtableCaseMaster?.rows?.length}
+                style={{ marginBottom: '1.5rem' }}
+              >
+                Generate events.csv & relationships.csv
+              </button>
+
+              {phase3Report.length > 0 && (
+                <div style={{ marginBottom: '1.5rem' }}>
+                  <h4 style={{ marginBottom: '0.5rem' }}>Validation Report</h4>
+                  <div style={{ maxHeight: '150px', overflowY: 'auto', fontSize: '0.8rem' }}>
+                    {phase3Report.map((item, i) => (
+                      <div key={i} style={{ display: 'flex', gap: '0.5rem', marginBottom: '0.25rem' }}>
+                        <span className={`badge badge-${item.type}`}>{item.type}</span>
+                        <span>{item.message}</span>
+                      </div>
                     ))}
-                  </tbody>
-                </table>
-              </div>
-            </div>
+                  </div>
+                </div>
+              )}
 
-            <div className="card">
-              <h3 style={{ marginBottom: '1rem' }}>Events Preview</h3>
-              <div className="table-container">
-                <table>
-                  <thead>
-                    <tr>
-                      <th>Client ID</th>
-                      <th>A#</th>
-                      <th>Date/Time</th>
-                      <th>Type</th>
-                      <th>Court</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {mergeResult.events.slice(0, 5).map((row, i) => (
-                      <tr key={i}>
-                        <td style={{ fontFamily: 'monospace', fontSize: '0.75rem' }}>{String(row['Client ID']).slice(0, 25)}</td>
-                        <td>{row['A#']}</td>
-                        <td>{row['Hearing Date/Time']}</td>
-                        <td>{row['Event Hearing Type']}</td>
-                        <td>{String(row['Court']).slice(0, 25)}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </div>
+              {phase3Result && (
+                <div>
+                  <div style={{ display: 'flex', gap: '1rem', marginBottom: '1.5rem' }}>
+                    <button
+                      className="btn btn-secondary"
+                      onClick={() => downloadCSV(
+                        phase3Result.events,
+                        'phase3_events.csv',
+                        ['Case Master', 'A#', 'Hearing Date/Time', 'Event Type', 'Event Hearing Type', 'Court', 'Judge', 'MCH Attny', 'Bahr Client', '_summary']
+                      )}
+                    >
+                      Download events.csv ({phase3Result.events.length})
+                    </button>
 
-            {/* Case Master Preview */}
-            <div className="card">
-              <h3 style={{ marginBottom: '1rem' }}>Case Master Preview (1 record per client)</h3>
-              <div className="table-container">
-                <table>
-                  <thead>
-                    <tr>
-                      <th>Client ID</th>
-                      <th>A#</th>
-                      <th>Client</th>
-                      <th>Notes</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {mergeResult.caseMaster.slice(0, 5).map((row, i) => (
-                      <tr key={i}>
-                        <td style={{ fontFamily: 'monospace', fontSize: '0.75rem' }}>{String(row['Client ID']).slice(0, 25)}</td>
-                        <td>{row['A#'] || '—'}</td>
-                        <td>{row['_client_name']}</td>
-                        <td>{row['_note_count']}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </div>
+                    <button
+                      className="btn btn-secondary"
+                      onClick={() => downloadCSV(
+                        phase3Result.relationships,
+                        'phase3_relationships.csv',
+                        ['Case Master View', 'Object Client', 'Relationship', 'Bahr Client', '_contact_name', '_original_relationship']
+                      )}
+                    >
+                      Download relationships.csv ({phase3Result.relationships.length})
+                    </button>
+                  </div>
 
-            {/* Linking Script Preview */}
-            <div className="card">
-              <h3 style={{ marginBottom: '1rem' }}>Linking Script Preview</h3>
-              <p style={{ fontSize: '0.8rem', color: '#71717a', marginBottom: '1rem' }}>
-                Run this in Airtable's Scripting Extension after importing all CSVs
-              </p>
-              <pre>{mergeResult.linkingScript}</pre>
+                  {phase3Result.events.length > 0 && (
+                    <div style={{ marginBottom: '1.5rem' }}>
+                      <h4 style={{ marginBottom: '0.5rem' }}>Events Preview</h4>
+                      <div className="table-container">
+                        <table>
+                          <thead>
+                            <tr>
+                              <th>Case Master (Record ID)</th>
+                              <th>A#</th>
+                              <th>Date/Time</th>
+                              <th>Type</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {phase3Result.events.slice(0, 5).map((row, i) => (
+                              <tr key={i}>
+                                <td style={{ fontFamily: 'monospace', fontSize: '0.7rem' }}>{row['Case Master'] ? row['Case Master'].slice(0, 12) + '...' : '—'}</td>
+                                <td>{row['A#']}</td>
+                                <td>{row['Hearing Date/Time']?.slice(0, 16)}</td>
+                                <td>{row['Event Hearing Type']}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  )}
+
+                  {phase3Result.relationships.length > 0 && (
+                    <div>
+                      <h4 style={{ marginBottom: '0.5rem' }}>Relationships Preview</h4>
+                      <div className="table-container">
+                        <table>
+                          <thead>
+                            <tr>
+                              <th>Case Master View</th>
+                              <th>Object Client</th>
+                              <th>Relationship</th>
+                              <th>Contact Name</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {phase3Result.relationships.slice(0, 5).map((row, i) => (
+                              <tr key={i}>
+                                <td style={{ fontFamily: 'monospace', fontSize: '0.7rem' }}>{row['Case Master View'] ? row['Case Master View'].slice(0, 12) + '...' : '—'}</td>
+                                <td style={{ fontFamily: 'monospace', fontSize: '0.7rem' }}>{row['Object Client'] ? row['Object Client'].slice(0, 12) + '...' : '—'}</td>
+                                <td>{row['Relationship']}</td>
+                                <td>{row['_contact_name']}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* Instructions */}
+        <div className="card" style={{ marginTop: '1.5rem' }}>
+          <h3 style={{ marginBottom: '1rem' }}>Import Order</h3>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '1rem', fontSize: '0.875rem' }}>
+            <div>
+              <div style={{ color: '#6366f1', fontWeight: 600, marginBottom: '0.5rem' }}>Phase 1</div>
+              <ol style={{ paddingLeft: '1.25rem', color: '#a1a1aa' }}>
+                <li>Upload Bahr + Clio Contacts</li>
+                <li>Download clients.csv</li>
+                <li>Import to Airtable</li>
+                <li>Export with Record IDs</li>
+              </ol>
+            </div>
+            <div>
+              <div style={{ color: '#a855f7', fontWeight: 600, marginBottom: '0.5rem' }}>Phase 2</div>
+              <ol style={{ paddingLeft: '1.25rem', color: '#a1a1aa' }}>
+                <li>Upload Airtable export + Clio Matters/Notes</li>
+                <li>Download case_master_views.csv</li>
+                <li>Import to Airtable</li>
+                <li>Export with Record IDs</li>
+              </ol>
+            </div>
+            <div>
+              <div style={{ color: '#ec4899', fontWeight: 600, marginBottom: '0.5rem' }}>Phase 3</div>
+              <ol style={{ paddingLeft: '1.25rem', color: '#a1a1aa' }}>
+                <li>Upload both Airtable exports</li>
+                <li>Upload Clio Events/Relationships</li>
+                <li>Download events.csv & relationships.csv</li>
+                <li>Import to Airtable</li>
+              </ol>
             </div>
           </div>
-        )}
-
-        {activeTab === 'results' && !mergeResult && (
-          <div className="card" style={{ textAlign: 'center', padding: '3rem' }}>
-            <p style={{ color: '#71717a' }}>Run the merge to see results</p>
-          </div>
-        )}
+        </div>
       </div>
     </div>
   );
 }
 
-// Render the app
 const root = ReactDOM.createRoot(document.getElementById('root'));
 root.render(<ClioAirtableMerger />);
   </script>
