@@ -1063,6 +1063,43 @@ function ClioAirtableMerger() {
   };
 
   // Phase 1: Client Import
+  // Helper to find a value in sheet data by trying multiple column name patterns
+  const findFieldInSheetData = (sheetData, patterns) => {
+    for (const [sheetName, records] of Object.entries(sheetData)) {
+      for (const record of records) {
+        for (const [key, value] of Object.entries(record.data || {})) {
+          const normalizedKey = normalizeColumnName(key);
+          for (const pattern of patterns) {
+            if (normalizedKey === pattern || normalizedKey.includes(pattern)) {
+              if (value && String(value).trim()) {
+                return String(value).trim();
+              }
+            }
+          }
+        }
+      }
+    }
+    return '';
+  };
+
+  // Field patterns for extracting demographics from sheet data
+  const FIELD_PATTERNS = {
+    firstName: ['first name', 'firstname', 'given name', 'nombre', 'primer nombre'],
+    lastName: ['last name', 'lastname', 'family name', 'surname', 'apellido', 'apellidos'],
+    middleName: ['middle name', 'middlename', 'segundo nombre'],
+    dob: ['dob', 'date of birth', 'birthdate', 'birth date', 'fecha de nacimiento'],
+    phone: ['phone', 'telephone', 'telphone', 'cell', 'mobile', 'telefono', 'celular'],
+    email: ['email', 'e-mail', 'correo', 'correo electronico'],
+    addressLine1: ['street', 'address', 'street number and name', 'direccion', 'calle'],
+    addressLine2: ['address line 2', 'apt', 'suite', 'unit', 'apartamento'],
+    city: ['city', 'ciudad'],
+    state: ['state', 'estado', 'province'],
+    zip: ['zip', 'zipcode', 'postal', 'codigo postal'],
+    country: ['country', 'citizenship', 'nationality', 'pais', 'nacionalidad', '18.a'],
+    entryDate: ['entry date', 'arrival', 'date of last arrival', '22.'],
+    placeOfEntry: ['place of entry', 'place of last arrival', 'port of entry', '23.'],
+  };
+
   const runPhase1 = useCallback(() => {
     const reports = [];
     const bahrLookup = new Map();
@@ -1072,12 +1109,76 @@ function ClioAirtableMerger() {
     let invalidANumbers = 0;
     let missingANumbers = 0;
 
-    // Build flatpack lookup from bahrMergedClients (Phase 0 Excel data)
-    const flatpackByANumber = new Map();
-    const flatpackByName = new Map();
+    if (bahrMergedClients.length === 0) {
+      reports.push({ type: 'warning', message: 'No clients loaded from Phase 0. Please parse the BAHR Excel file first.' });
+      setPhase1Result(null);
+      setPhase1Report(reports);
+      return;
+    }
 
-    bahrMergedClients.forEach(client => {
-      // Build the flatpack data object (sheet data grouped by sheet name)
+    reports.push({ type: 'info', message: `Processing ${bahrMergedClients.length} clients from Phase 0 data` });
+
+    // Build client records from bahrMergedClients
+    bahrMergedClients.forEach((client, idx) => {
+      // Parse name from primaryName (usually "Last, First" or "First Last")
+      let firstName = '';
+      let lastName = '';
+      let middleName = '';
+      const name = client.primaryName || '';
+
+      if (name.includes(',')) {
+        // "Last, First Middle" format
+        const parts = name.split(',').map(p => p.trim());
+        lastName = parts[0] || '';
+        const firstParts = (parts[1] || '').split(' ');
+        firstName = firstParts[0] || '';
+        middleName = firstParts.slice(1).join(' ');
+      } else {
+        // "First Last" format - try to find from sheet data first
+        firstName = findFieldInSheetData(client.sheetData, FIELD_PATTERNS.firstName);
+        lastName = findFieldInSheetData(client.sheetData, FIELD_PATTERNS.lastName);
+        middleName = findFieldInSheetData(client.sheetData, FIELD_PATTERNS.middleName);
+
+        // Fallback: split the name
+        if (!firstName && !lastName) {
+          const parts = name.split(' ');
+          if (parts.length >= 2) {
+            firstName = parts[0];
+            lastName = parts.slice(1).join(' ');
+          } else {
+            lastName = name;
+          }
+        }
+      }
+
+      // Extract other fields from sheet data
+      const dob = findFieldInSheetData(client.sheetData, FIELD_PATTERNS.dob);
+      const rawANumber = client.aNumber || '';
+      const aNumberResult = normalizeANumber(rawANumber);
+      const nameKey = normalizeName(lastName, firstName);
+
+      let clientId = '';
+      let aNumberStatus = '';
+
+      if (aNumberResult.isValid) {
+        clientId = aNumberResult.normalized;
+        aNumberStatus = 'valid';
+        validANumbers++;
+      } else if (!rawANumber) {
+        clientId = generateFallbackId(lastName, firstName, dob) || `PENDING-${idx}`;
+        aNumberStatus = 'missing';
+        missingANumbers++;
+      } else {
+        clientId = generateFallbackId(lastName, firstName, dob) || `PENDING-${idx}`;
+        aNumberStatus = 'invalid';
+        invalidANumbers++;
+        reports.push({
+          type: 'warning',
+          message: `${firstName} ${lastName}: Invalid A# "${rawANumber}"`
+        });
+      }
+
+      // Build flatpack data object for uscis_flatpack_data field
       const flatpackData = {};
       Object.entries(client.sheetData).forEach(([sheetName, records]) => {
         flatpackData[sheetName] = records.map(record => record.data);
@@ -1090,83 +1191,33 @@ function ClioAirtableMerger() {
         ...flatpackData
       };
 
-      if (client.aNumber) {
-        flatpackByANumber.set(client.aNumber, flatpackObj);
-      }
-      // Also index by normalized name for fallback matching
-      client.names.forEach(name => {
-        const normalized = normalizeName(
-          name.split(',')[0]?.trim() || name.split(' ').pop() || '',
-          name.split(',')[1]?.trim() || name.split(' ')[0] || ''
-        );
-        if (normalized && !flatpackByName.has(normalized)) {
-          flatpackByName.set(normalized, flatpackObj);
-        }
-      });
+      const record = {
+        _nameKey: nameKey,
+        _clientId: clientId,
+        _aNumberStatus: aNumberStatus,
+        _flatpackData: flatpackObj,
+        lastName,
+        firstName,
+        middleName,
+        aNumber: aNumberResult.isValid ? aNumberResult.normalized : '',
+        phone: findFieldInSheetData(client.sheetData, FIELD_PATTERNS.phone),
+        email: findFieldInSheetData(client.sheetData, FIELD_PATTERNS.email),
+        addressLine1: findFieldInSheetData(client.sheetData, FIELD_PATTERNS.addressLine1),
+        addressLine2: findFieldInSheetData(client.sheetData, FIELD_PATTERNS.addressLine2),
+        state: findFieldInSheetData(client.sheetData, FIELD_PATTERNS.state),
+        city: findFieldInSheetData(client.sheetData, FIELD_PATTERNS.city),
+        zip: findFieldInSheetData(client.sheetData, FIELD_PATTERNS.zip),
+        country: findFieldInSheetData(client.sheetData, FIELD_PATTERNS.country),
+        entryDate: findFieldInSheetData(client.sheetData, FIELD_PATTERNS.entryDate),
+        placeOfEntry: findFieldInSheetData(client.sheetData, FIELD_PATTERNS.placeOfEntry),
+        dob: dob,
+        clioContactId: '', // Will be populated from Clio Contacts
+      };
+
+      bahrLookup.set(nameKey, record);
     });
 
-    reports.push({ type: 'info', message: `Loaded ${bahrMergedClients.length} clients from Phase 0 flatpack data` });
-
-    // Build Bahr lookup
-    if (phase1Data.bahr?.rows) {
-      phase1Data.bahr.rows.forEach((row, idx) => {
-        const lastName = row['Last Name'] || '';
-        const firstName = row['First Name'] || '';
-        const middleName = row['Middle Name'] || '';
-        const dob = row['DOB'] || '';
-        const rawANumber = row['A number'] || '';
-
-        const aNumberResult = normalizeANumber(rawANumber);
-        const nameKey = normalizeName(lastName, firstName);
-
-        let clientId = '';
-        let aNumberStatus = '';
-
-        if (aNumberResult.isValid) {
-          clientId = aNumberResult.normalized;
-          aNumberStatus = 'valid';
-          validANumbers++;
-        } else if (aNumberResult.issue === 'empty') {
-          clientId = generateFallbackId(lastName, firstName, dob) || `PENDING-ROW-${idx}`;
-          aNumberStatus = 'missing';
-          missingANumbers++;
-        } else {
-          clientId = generateFallbackId(lastName, firstName, dob) || `PENDING-ROW-${idx}`;
-          aNumberStatus = 'invalid';
-          invalidANumbers++;
-          reports.push({
-            type: 'warning',
-            message: `Row ${idx + 2} (${firstName} ${lastName}): Invalid A# "${rawANumber}"`
-          });
-        }
-
-        const record = {
-          _nameKey: nameKey,
-          _clientId: clientId,
-          _aNumberStatus: aNumberStatus,
-          lastName,
-          firstName,
-          middleName,
-          aNumber: aNumberResult.isValid ? aNumberResult.normalized : '',
-          phone: row['Telphone Number'] || '',
-          email: row['Email'] || '',
-          addressLine1: row['Street Number and Name'] || '',
-          addressLine2: [row['Address line 2'], row['AptSte'], row['FlrNumber']].filter(Boolean).join(' '),
-          state: row['State'] || '',
-          city: row['City'] || '',
-          zip: row['zipcode'] || '',
-          country: row['18.a. Country of Citizenship or Nationality'] || '',
-          entryDate: row['22. Date of Last Arrival into United States'] || '',
-          placeOfEntry: row['23. Place of Last Arrival to US'] || '',
-          dob: dob,
-          clioContactId: '', // Will be populated from Clio Contacts
-        };
-
-        bahrLookup.set(nameKey, record);
-      });
-    }
-
-    reports.push({ type: 'info', message: `Loaded ${bahrLookup.size} clients from Bahr dataset` });
+    reports.push({ type: 'info', message: `Built ${bahrLookup.size} client records from Phase 0 data` });
     reports.push({
       type: validANumbers === bahrLookup.size ? 'success' : 'warning',
       message: `A# Validation: ${validANumbers} valid, ${invalidANumbers} malformed, ${missingANumbers} missing`
@@ -1198,22 +1249,7 @@ function ClioAirtableMerger() {
     }
 
     // Build output
-    let flatpackMatches = 0;
-    let flatpackMisses = 0;
-
     bahrLookup.forEach((record) => {
-      // Look up flatpack data by A# first, then by name
-      let flatpackData = null;
-      if (record.aNumber && flatpackByANumber.has(record.aNumber)) {
-        flatpackData = flatpackByANumber.get(record.aNumber);
-        flatpackMatches++;
-      } else if (flatpackByName.has(record._nameKey)) {
-        flatpackData = flatpackByName.get(record._nameKey);
-        flatpackMatches++;
-      } else {
-        flatpackMisses++;
-      }
-
       clientsOutput.push({
         'Client ID': record._clientId,
         'A#': record.aNumber,
@@ -1234,13 +1270,8 @@ function ClioAirtableMerger() {
         'clio_contact_id': record.clioContactId,
         'ICH Atty': ANDREW_BAHR_RECORD_ID,
         'Bahr Client': 'TRUE',
-        'uscis_flatpack_data': flatpackData ? JSON.stringify(flatpackData) : '',
+        'uscis_flatpack_data': JSON.stringify(record._flatpackData),
       });
-    });
-
-    reports.push({
-      type: flatpackMatches > 0 ? 'success' : 'warning',
-      message: `Flatpack data: ${flatpackMatches} matched, ${flatpackMisses} unmatched`
     });
 
     setPhase1Result({ clients: clientsOutput });
@@ -1913,39 +1944,54 @@ function ClioAirtableMerger() {
             <div>
               <h2 style={{ marginBottom: '1rem', fontSize: '1.25rem' }}>Phase 1: Client Import</h2>
               <p style={{ color: '#71717a', marginBottom: '1.5rem', fontSize: '0.875rem' }}>
-                Merge Bahr dataset with Clio Contacts. Output includes <code>clio_contact_id</code>, <code>ICH Atty</code>, and <code>Bahr Client</code> fields.
+                Uses Phase 0 data with optional Clio Contacts enrichment. Output includes <code>clio_contact_id</code>, <code>uscis_flatpack_data</code>, and <code>Bahr Client</code> fields.
               </p>
 
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '1rem', marginBottom: '1.5rem' }}>
-                {[
-                  { key: 'bahr', label: 'Bahr Dataset', desc: 'Authority source with A# and demographics', required: true },
-                  { key: 'clioContacts', label: 'Clio Contacts Export', desc: 'UniqueId, phone, email', required: true },
-                ].map(({ key, label, desc, required }) => (
-                  <div key={key}>
-                    <h4 style={{ fontSize: '0.875rem', marginBottom: '0.5rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                      {label}
-                      {required && <span className="badge badge-warning">Required</span>}
-                    </h4>
-                    <p style={{ fontSize: '0.75rem', color: '#71717a', marginBottom: '0.5rem' }}>{desc}</p>
-                    <label className={`upload-zone ${phase1Files[key] ? 'has-file' : ''}`}>
-                      <input type="file" accept=".csv" onChange={handleFileUpload(1, key)} style={{ display: 'none' }} />
-                      {phase1Files[key] ? (
-                        <div>
-                          <span style={{ color: '#22c55e' }}>✓</span> {phase1Files[key].name}
-                          <div style={{ fontSize: '0.75rem', color: '#71717a' }}>{phase1Data[key]?.rows?.length || 0} rows</div>
-                        </div>
-                      ) : (
-                        <div style={{ color: '#71717a' }}>Drop CSV or click to upload</div>
-                      )}
-                    </label>
+                {/* Phase 0 Data Status */}
+                <div>
+                  <h4 style={{ fontSize: '0.875rem', marginBottom: '0.5rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                    BAHR Data (from Phase 0)
+                    <span className="badge badge-warning">Required</span>
+                  </h4>
+                  <p style={{ fontSize: '0.75rem', color: '#71717a', marginBottom: '0.5rem' }}>Parsed from Excel in Phase 0</p>
+                  <div className={`upload-zone ${bahrMergedClients.length > 0 ? 'has-file' : ''}`} style={{ cursor: 'default' }}>
+                    {bahrMergedClients.length > 0 ? (
+                      <div>
+                        <span style={{ color: '#22c55e' }}>✓</span> Phase 0 data loaded
+                        <div style={{ fontSize: '0.75rem', color: '#71717a' }}>{bahrMergedClients.length} clients</div>
+                      </div>
+                    ) : (
+                      <div style={{ color: '#ef4444' }}>⚠ Parse BAHR Excel in Phase 0 first</div>
+                    )}
                   </div>
-                ))}
+                </div>
+
+                {/* Clio Contacts Upload */}
+                <div>
+                  <h4 style={{ fontSize: '0.875rem', marginBottom: '0.5rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                    Clio Contacts Export
+                    <span className="badge badge-info">Optional</span>
+                  </h4>
+                  <p style={{ fontSize: '0.75rem', color: '#71717a', marginBottom: '0.5rem' }}>UniqueId, phone, email enrichment</p>
+                  <label className={`upload-zone ${phase1Files.clioContacts ? 'has-file' : ''}`}>
+                    <input type="file" accept=".csv" onChange={handleFileUpload(1, 'clioContacts')} style={{ display: 'none' }} />
+                    {phase1Files.clioContacts ? (
+                      <div>
+                        <span style={{ color: '#22c55e' }}>✓</span> {phase1Files.clioContacts.name}
+                        <div style={{ fontSize: '0.75rem', color: '#71717a' }}>{phase1Data.clioContacts?.rows?.length || 0} rows</div>
+                      </div>
+                    ) : (
+                      <div style={{ color: '#71717a' }}>Drop CSV or click to upload</div>
+                    )}
+                  </label>
+                </div>
               </div>
 
               <button
                 className="btn btn-primary"
                 onClick={runPhase1}
-                disabled={!phase1Data.bahr?.rows?.length}
+                disabled={bahrMergedClients.length === 0}
                 style={{ marginBottom: '1.5rem' }}
               >
                 Generate clients.csv
@@ -1972,7 +2018,7 @@ function ClioAirtableMerger() {
                     onClick={() => downloadCSV(
                       phase1Result.clients,
                       'phase1_clients.csv',
-                      ['Client ID', 'A#', 'First Name', 'Middle Name', 'Family Name', 'Phone Number', 'Client Email', 'Address Line 1', 'Address Line 2', 'City', 'State', 'Zip (5)', 'Country', 'Entry Date', 'Place of Entry', 'DOB', 'clio_contact_id', 'ICH Atty', 'Bahr Client']
+                      ['Client ID', 'A#', 'First Name', 'Middle Name', 'Family Name', 'Phone Number', 'Client Email', 'Address Line 1', 'Address Line 2', 'City', 'State', 'Zip (5)', 'Country', 'Entry Date', 'Place of Entry', 'DOB', 'clio_contact_id', 'ICH Atty', 'Bahr Client', 'uscis_flatpack_data']
                     )}
                   >
                     Download clients.csv ({phase1Result.clients.length} records)
