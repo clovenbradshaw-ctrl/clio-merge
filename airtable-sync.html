@@ -1,0 +1,1160 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Airtable Sync - Data Mapping & Deduplication</title>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+      min-height: 100vh;
+      color: #e2e8f0;
+    }
+    .container { max-width: 1400px; margin: 0 auto; padding: 20px; }
+    h1 { color: #a5b4fc; margin-bottom: 10px; }
+    .subtitle { color: #94a3b8; margin-bottom: 20px; }
+
+    .card {
+      background: rgba(30, 41, 59, 0.8);
+      border: 1px solid #334155;
+      border-radius: 12px;
+      padding: 20px;
+      margin-bottom: 20px;
+    }
+    .card h2 { color: #a5b4fc; margin-bottom: 15px; font-size: 1.2em; }
+    .card h3 { color: #94a3b8; margin-bottom: 10px; font-size: 1em; }
+
+    .input-group { margin-bottom: 15px; }
+    .input-group label { display: block; margin-bottom: 5px; color: #94a3b8; }
+    input[type="text"], input[type="password"], select {
+      width: 100%;
+      padding: 10px;
+      border: 1px solid #475569;
+      border-radius: 6px;
+      background: #1e293b;
+      color: #e2e8f0;
+    }
+    input:focus, select:focus { outline: none; border-color: #6366f1; }
+
+    button {
+      padding: 10px 20px;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 0.9em;
+      transition: all 0.2s;
+    }
+    button.primary { background: #6366f1; color: white; }
+    button.primary:hover { background: #4f46e5; }
+    button.success { background: #10b981; color: white; }
+    button.success:hover { background: #059669; }
+    button.warning { background: #f59e0b; color: white; }
+    button.warning:hover { background: #d97706; }
+    button.danger { background: #ef4444; color: white; }
+    button.danger:hover { background: #dc2626; }
+    button:disabled { background: #475569; cursor: not-allowed; opacity: 0.6; }
+
+    .btn-group { display: flex; gap: 10px; flex-wrap: wrap; }
+
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+      gap: 15px;
+      margin: 15px 0;
+    }
+    .stat-card {
+      background: #1e293b;
+      border: 1px solid #334155;
+      border-radius: 8px;
+      padding: 15px;
+      text-align: center;
+    }
+    .stat-card .number { font-size: 1.8em; font-weight: bold; color: #10b981; }
+    .stat-card .label { color: #94a3b8; font-size: 0.85em; }
+    .stat-card.warning .number { color: #f59e0b; }
+    .stat-card.danger .number { color: #ef4444; }
+    .stat-card.info .number { color: #6366f1; }
+
+    .upload-zone {
+      border: 2px dashed #475569;
+      border-radius: 8px;
+      padding: 30px;
+      text-align: center;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    .upload-zone:hover { border-color: #6366f1; background: rgba(99, 102, 241, 0.1); }
+    .upload-zone.has-file { border-color: #10b981; background: rgba(16, 185, 129, 0.1); }
+    .upload-zone input { display: none; }
+
+    .table-container { overflow-x: auto; margin: 15px 0; max-height: 400px; overflow-y: auto; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.85em; }
+    th, td { padding: 10px; text-align: left; border-bottom: 1px solid #334155; }
+    th { background: #1e293b; position: sticky; top: 0; color: #a5b4fc; }
+    tr:hover { background: rgba(99, 102, 241, 0.1); }
+
+    .badge {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 4px;
+      font-size: 0.8em;
+      font-weight: 500;
+    }
+    .badge.new { background: #10b981; color: white; }
+    .badge.exists { background: #f59e0b; color: white; }
+    .badge.update { background: #6366f1; color: white; }
+    .badge.error { background: #ef4444; color: white; }
+
+    .log-container {
+      background: #0f172a;
+      border: 1px solid #334155;
+      border-radius: 8px;
+      padding: 15px;
+      max-height: 300px;
+      overflow-y: auto;
+      font-family: monospace;
+      font-size: 0.85em;
+    }
+    .log-entry { padding: 4px 0; border-bottom: 1px solid #1e293b; }
+    .log-entry.info { color: #6366f1; }
+    .log-entry.success { color: #10b981; }
+    .log-entry.warning { color: #f59e0b; }
+    .log-entry.error { color: #ef4444; }
+
+    .mapping-grid {
+      display: grid;
+      grid-template-columns: 1fr auto 1fr;
+      gap: 10px;
+      align-items: center;
+    }
+    .arrow { color: #6366f1; font-weight: bold; }
+
+    .progress-bar {
+      background: #1e293b;
+      border-radius: 4px;
+      height: 8px;
+      overflow: hidden;
+      margin: 10px 0;
+    }
+    .progress-bar .fill {
+      height: 100%;
+      background: linear-gradient(90deg, #6366f1, #10b981);
+      transition: width 0.3s;
+    }
+
+    .tabs { display: flex; gap: 5px; margin-bottom: 15px; }
+    .tab {
+      padding: 10px 20px;
+      background: #1e293b;
+      border: 1px solid #334155;
+      border-radius: 6px 6px 0 0;
+      cursor: pointer;
+      color: #94a3b8;
+    }
+    .tab.active { background: #334155; color: #a5b4fc; border-bottom-color: #334155; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel">
+const { useState, useCallback, useEffect, useRef } = React;
+
+// ============================================
+// CONFIGURATION
+// ============================================
+
+// ICH Attorney Record ID (Andrew Bahr)
+const ICH_ATTY_RECORD_ID = 'recRaQ8cur6na6kIw';
+
+// Airtable Base Configuration
+const AIRTABLE_CONFIG = {
+  baseId: '', // Will be set from UI
+  tables: {
+    clientInfo: {
+      name: 'Client Info',
+      uniqueFields: ['A#', 'clio_contact_id', 'Client ID'],
+      fields: {
+        'Client ID': { type: 'text', required: false },
+        'A#': { type: 'text', required: false, normalize: 'normalizeANumber' },
+        'First Name': { type: 'text', required: true },
+        'Middle Name': { type: 'text', required: false },
+        'Family Name': { type: 'text', required: true },
+        'Phone Number': { type: 'phone', required: false, normalize: 'normalizePhone' },
+        'Client Email': { type: 'email', required: false, normalize: 'normalizeEmail' },
+        'Address Line 1': { type: 'text', required: false },
+        'Address Line 2': { type: 'text', required: false },
+        'City': { type: 'text', required: false },
+        'State': { type: 'text', required: false, normalize: 'normalizeState' },
+        'Zip (5)': { type: 'text', required: false, normalize: 'normalizeZip' },
+        'Country': { type: 'text', required: false, normalize: 'normalizeCountry' },
+        'Entry Date': { type: 'date', required: false, normalize: 'normalizeDate' },
+        'Place of Entry': { type: 'text', required: false },
+        'DOB': { type: 'date', required: false, normalize: 'normalizeDate' },
+        'clio_contact_id': { type: 'text', required: false },
+        'ICH Atty': { type: 'link', required: false, defaultValue: ICH_ATTY_RECORD_ID },
+        'Bahr Client': { type: 'checkbox', required: false, defaultValue: true },
+        'uscis_flatpack_data': { type: 'longtext', required: false },
+      }
+    },
+    caseMaster: {
+      name: 'Case Master View',
+      uniqueFields: ['clio_matter_id', 'PP ID'],
+      fields: {
+        'Client': { type: 'link', required: true },
+        'clio_matter_id': { type: 'text', required: false },
+        'PP ID': { type: 'text', required: false },
+        'Description': { type: 'text', required: false },
+        'File Case Status': { type: 'select', required: false },
+        'Case Notes': { type: 'longtext', required: false },
+        'Bahr Client': { type: 'checkbox', required: false, defaultValue: true },
+      }
+    },
+    events: {
+      name: 'Events',
+      uniqueFields: ['Event ID'],
+      fields: {
+        'Case Master': { type: 'link', required: false },
+        'A#': { type: 'text', required: false },
+        'Hearing Date/Time': { type: 'datetime', required: false },
+        'Event Type': { type: 'select', required: false },
+        'Event Hearing Type': { type: 'select', required: false },
+        'Court': { type: 'text', required: false },
+        'Judge': { type: 'text', required: false },
+        'MCH Attny': { type: 'link', required: false },
+        'Bahr Client': { type: 'checkbox', required: false, defaultValue: true },
+      }
+    },
+    relationships: {
+      name: 'Relationships',
+      uniqueFields: [],
+      fields: {
+        'Case Master View': { type: 'link', required: false },
+        'Object Client': { type: 'link', required: false },
+        'Relationship': { type: 'select', required: false },
+        'Bahr Client': { type: 'checkbox', required: false, defaultValue: true },
+      }
+    }
+  }
+};
+
+// ============================================
+// NORMALIZATION FUNCTIONS
+// ============================================
+
+const normalizers = {
+  normalizeANumber: (value) => {
+    if (!value) return '';
+    const digits = String(value).replace(/[^0-9]/g, '');
+    if (digits.length === 9) {
+      return `${digits.slice(0,3)}-${digits.slice(3,6)}-${digits.slice(6,9)}`;
+    }
+    if (digits.length === 10 && digits[0] === '1') {
+      return `${digits.slice(1,4)}-${digits.slice(4,7)}-${digits.slice(7,10)}`;
+    }
+    return value;
+  },
+
+  normalizePhone: (value) => {
+    if (!value) return '';
+    const digits = String(value).replace(/\D/g, '');
+    // Reject 9 digits (likely A#)
+    if (digits.length === 9) return '';
+    if (digits.length === 10) return digits;
+    if (digits.length === 11 && digits.startsWith('1')) return digits.slice(1);
+    if (digits.length >= 7 && digits.length !== 9) return digits;
+    return '';
+  },
+
+  normalizeEmail: (value) => {
+    if (!value) return '';
+    return String(value).trim().toLowerCase();
+  },
+
+  normalizeDate: (value) => {
+    if (!value) return '';
+    const trimmed = String(value).trim();
+    if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) return trimmed;
+
+    // Try MM/DD/YYYY
+    const slashParts = trimmed.split('/');
+    if (slashParts.length === 3) {
+      const [m, d, y] = slashParts;
+      const month = m.padStart(2, '0');
+      const day = d.padStart(2, '0');
+      let year = y;
+      if (y.length === 2) year = parseInt(y) > 50 ? '19' + y : '20' + y;
+      return `${year}-${month}-${day}`;
+    }
+
+    const date = new Date(trimmed);
+    if (!isNaN(date.getTime())) return date.toISOString().split('T')[0];
+    return trimmed;
+  },
+
+  normalizeZip: (value) => {
+    if (!value) return '';
+    const match = String(value).match(/\d{5}/);
+    return match ? match[0] : String(value).replace(/\D/g, '').slice(0, 5);
+  },
+
+  normalizeState: (value) => {
+    if (!value) return '';
+    return String(value).trim().toUpperCase();
+  },
+
+  normalizeCountry: (value) => {
+    if (!value) return '';
+    const v = String(value).trim().toLowerCase();
+    const map = {
+      'usa': 'United States', 'us': 'United States', 'united states': 'United States',
+      'mexico': 'Mexico', 'mx': 'Mexico',
+      'guatemala': 'Guatemala', 'gt': 'Guatemala',
+      'honduras': 'Honduras', 'hn': 'Honduras',
+      'el salvador': 'El Salvador', 'sv': 'El Salvador', 'salvador': 'El Salvador',
+      'nicaragua': 'Nicaragua', 'ni': 'Nicaragua',
+      'venezuela': 'Venezuela', 've': 'Venezuela',
+      'colombia': 'Colombia', 'co': 'Colombia',
+      'ecuador': 'Ecuador', 'ec': 'Ecuador',
+      'peru': 'Peru', 'pe': 'Peru',
+      'brazil': 'Brazil', 'br': 'Brazil',
+      'cuba': 'Cuba', 'cu': 'Cuba',
+      'haiti': 'Haiti', 'ht': 'Haiti',
+      'dominican republic': 'Dominican Republic', 'do': 'Dominican Republic',
+    };
+    return map[v] || String(value).trim();
+  }
+};
+
+// ============================================
+// CSV PARSER
+// ============================================
+
+const parseCSV = (text) => {
+  if (!text || !text.trim()) return { headers: [], rows: [] };
+
+  const rows = [];
+  let currentRow = [];
+  let currentField = '';
+  let inQuotes = false;
+
+  for (let i = 0; i < text.length; i++) {
+    const char = text[i];
+    const nextChar = text[i + 1];
+
+    if (inQuotes) {
+      if (char === '"' && nextChar === '"') {
+        currentField += '"';
+        i++;
+      } else if (char === '"') {
+        inQuotes = false;
+      } else {
+        currentField += char;
+      }
+    } else {
+      if (char === '"') {
+        inQuotes = true;
+      } else if (char === ',' || char === '\t') {
+        currentRow.push(currentField.trim());
+        currentField = '';
+      } else if (char === '\n' || (char === '\r' && nextChar === '\n')) {
+        currentRow.push(currentField.trim());
+        currentField = '';
+        if (currentRow.some(f => f !== '')) rows.push([...currentRow]);
+        currentRow = [];
+        if (char === '\r' && nextChar === '\n') i++;
+      } else if (char === '\r') {
+        currentRow.push(currentField.trim());
+        currentField = '';
+        if (currentRow.some(f => f !== '')) rows.push([...currentRow]);
+        currentRow = [];
+      } else {
+        currentField += char;
+      }
+    }
+  }
+
+  if (currentField !== '' || currentRow.length > 0) {
+    currentRow.push(currentField.trim());
+    if (currentRow.some(f => f !== '')) rows.push(currentRow);
+  }
+
+  if (rows.length === 0) return { headers: [], rows: [] };
+
+  const headers = rows[0];
+  const dataRows = rows.slice(1).map(row => {
+    const obj = {};
+    headers.forEach((h, i) => obj[h] = row[i] || '');
+    return obj;
+  });
+
+  return { headers, rows: dataRows };
+};
+
+// ============================================
+// AIRTABLE API CLIENT
+// ============================================
+
+class AirtableClient {
+  constructor(apiKey, baseId) {
+    this.apiKey = apiKey;
+    this.baseId = baseId;
+    this.baseUrl = `https://api.airtable.com/v0/${baseId}`;
+  }
+
+  async request(endpoint, options = {}) {
+    const response = await fetch(`${this.baseUrl}${endpoint}`, {
+      ...options,
+      headers: {
+        'Authorization': `Bearer ${this.apiKey}`,
+        'Content-Type': 'application/json',
+        ...options.headers
+      }
+    });
+
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new Error(error.error?.message || `HTTP ${response.status}`);
+    }
+
+    return response.json();
+  }
+
+  async getAllRecords(tableName, fields = [], filterFormula = '') {
+    const allRecords = [];
+    let offset = null;
+
+    do {
+      const params = new URLSearchParams();
+      if (fields.length > 0) {
+        fields.forEach(f => params.append('fields[]', f));
+      }
+      if (filterFormula) {
+        params.append('filterByFormula', filterFormula);
+      }
+      if (offset) {
+        params.append('offset', offset);
+      }
+
+      const url = `/${encodeURIComponent(tableName)}?${params.toString()}`;
+      const response = await this.request(url);
+
+      allRecords.push(...response.records);
+      offset = response.offset;
+    } while (offset);
+
+    return allRecords;
+  }
+
+  async createRecords(tableName, records) {
+    // Airtable allows max 10 records per request
+    const batches = [];
+    for (let i = 0; i < records.length; i += 10) {
+      batches.push(records.slice(i, i + 10));
+    }
+
+    const results = [];
+    for (const batch of batches) {
+      const response = await this.request(`/${encodeURIComponent(tableName)}`, {
+        method: 'POST',
+        body: JSON.stringify({ records: batch.map(r => ({ fields: r })) })
+      });
+      results.push(...response.records);
+      // Rate limiting - Airtable allows 5 requests/second
+      await new Promise(resolve => setTimeout(resolve, 250));
+    }
+
+    return results;
+  }
+
+  async updateRecords(tableName, records) {
+    // records should be array of { id, fields }
+    const batches = [];
+    for (let i = 0; i < records.length; i += 10) {
+      batches.push(records.slice(i, i + 10));
+    }
+
+    const results = [];
+    for (const batch of batches) {
+      const response = await this.request(`/${encodeURIComponent(tableName)}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ records: batch })
+      });
+      results.push(...response.records);
+      await new Promise(resolve => setTimeout(resolve, 250));
+    }
+
+    return results;
+  }
+}
+
+// ============================================
+// MAIN COMPONENT
+// ============================================
+
+function AirtableSync() {
+  // State
+  const [apiKey, setApiKey] = useState(localStorage.getItem('airtable_api_key') || '');
+  const [baseId, setBaseId] = useState(localStorage.getItem('airtable_base_id') || '');
+  const [activeTable, setActiveTable] = useState('clientInfo');
+  const [activeTab, setActiveTab] = useState('upload');
+
+  // Data state
+  const [sourceData, setSourceData] = useState([]);
+  const [existingRecords, setExistingRecords] = useState([]);
+  const [syncPreview, setSyncPreview] = useState({ new: [], existing: [], updates: [], errors: [] });
+
+  // UI state
+  const [loading, setLoading] = useState(false);
+  const [logs, setLogs] = useState([]);
+  const [fileName, setFileName] = useState('');
+  const [progress, setProgress] = useState({ current: 0, total: 0, phase: '' });
+
+  // Refs
+  const logContainerRef = useRef(null);
+
+  // Save API key and base ID to localStorage
+  useEffect(() => {
+    if (apiKey) localStorage.setItem('airtable_api_key', apiKey);
+    if (baseId) localStorage.setItem('airtable_base_id', baseId);
+  }, [apiKey, baseId]);
+
+  // Auto-scroll logs
+  useEffect(() => {
+    if (logContainerRef.current) {
+      logContainerRef.current.scrollTop = logContainerRef.current.scrollHeight;
+    }
+  }, [logs]);
+
+  const addLog = (message, type = 'info') => {
+    const timestamp = new Date().toLocaleTimeString();
+    setLogs(prev => [...prev, { message, type, timestamp }]);
+  };
+
+  const clearLogs = () => setLogs([]);
+
+  // Get current table config
+  const currentTableConfig = AIRTABLE_CONFIG.tables[activeTable];
+
+  // Handle file upload
+  const handleFileUpload = useCallback((file) => {
+    setFileName(file.name);
+    addLog(`Loading file: ${file.name}`, 'info');
+
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        let data;
+        if (file.name.endsWith('.xlsx') || file.name.endsWith('.xls')) {
+          const workbook = XLSX.read(e.target.result, { type: 'array' });
+          const sheetName = workbook.SheetNames[0];
+          const sheet = workbook.Sheets[sheetName];
+          data = XLSX.utils.sheet_to_json(sheet, { defval: '' });
+          addLog(`Parsed Excel: ${data.length} rows from sheet "${sheetName}"`, 'success');
+        } else {
+          const parsed = parseCSV(e.target.result);
+          data = parsed.rows;
+          addLog(`Parsed CSV: ${data.length} rows, ${parsed.headers.length} columns`, 'success');
+        }
+        setSourceData(data);
+      } catch (err) {
+        addLog(`Error parsing file: ${err.message}`, 'error');
+      }
+    };
+
+    if (file.name.endsWith('.xlsx') || file.name.endsWith('.xls')) {
+      reader.readAsArrayBuffer(file);
+    } else {
+      reader.readAsText(file);
+    }
+  }, []);
+
+  // Fetch existing records from Airtable
+  const fetchExistingRecords = async () => {
+    if (!apiKey || !baseId) {
+      addLog('Please enter API key and Base ID', 'error');
+      return;
+    }
+
+    setLoading(true);
+    addLog(`Fetching existing records from ${currentTableConfig.name}...`, 'info');
+
+    try {
+      const client = new AirtableClient(apiKey, baseId);
+      const uniqueFields = currentTableConfig.uniqueFields;
+      const records = await client.getAllRecords(currentTableConfig.name, uniqueFields);
+
+      setExistingRecords(records);
+      addLog(`Fetched ${records.length} existing records`, 'success');
+
+      // Log unique field distribution
+      uniqueFields.forEach(field => {
+        const withField = records.filter(r => r.fields[field]).length;
+        addLog(`  - ${field}: ${withField} records with values`, 'info');
+      });
+    } catch (err) {
+      addLog(`Error fetching records: ${err.message}`, 'error');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Normalize and prepare record for Airtable
+  const prepareRecord = (sourceRow) => {
+    const record = {};
+    const fieldConfig = currentTableConfig.fields;
+
+    Object.entries(fieldConfig).forEach(([fieldName, config]) => {
+      let value = sourceRow[fieldName];
+
+      // Apply normalization if specified
+      if (value && config.normalize && normalizers[config.normalize]) {
+        value = normalizers[config.normalize](value);
+      }
+
+      // Apply default value if no value and default exists
+      if ((value === undefined || value === null || value === '') && config.defaultValue !== undefined) {
+        value = config.defaultValue;
+      }
+
+      // Handle link fields (need to be arrays of record IDs)
+      if (config.type === 'link' && value && typeof value === 'string') {
+        // If it's a record ID (starts with 'rec'), wrap in array
+        if (value.startsWith('rec')) {
+          value = [value];
+        }
+      }
+
+      // Handle checkbox fields
+      if (config.type === 'checkbox') {
+        value = value === true || value === 'TRUE' || value === 'true' || value === '1' || value === 1;
+      }
+
+      if (value !== undefined && value !== null && value !== '') {
+        record[fieldName] = value;
+      }
+    });
+
+    // Always set ICH Atty for Client Info table
+    if (activeTable === 'clientInfo') {
+      record['ICH Atty'] = [ICH_ATTY_RECORD_ID];
+      record['Bahr Client'] = true;
+    }
+
+    return record;
+  };
+
+  // Build duplicate lookup map from existing records
+  const buildLookupMap = () => {
+    const lookups = {};
+
+    currentTableConfig.uniqueFields.forEach(field => {
+      lookups[field] = new Map();
+    });
+
+    existingRecords.forEach(record => {
+      currentTableConfig.uniqueFields.forEach(field => {
+        const value = record.fields[field];
+        if (value) {
+          const normalizedValue = String(value).trim().toLowerCase();
+          lookups[field].set(normalizedValue, record);
+        }
+      });
+    });
+
+    return lookups;
+  };
+
+  // Check for duplicates
+  const checkDuplicates = () => {
+    if (sourceData.length === 0) {
+      addLog('No source data loaded', 'error');
+      return;
+    }
+
+    addLog(`Checking ${sourceData.length} records for duplicates...`, 'info');
+
+    const lookups = buildLookupMap();
+    const preview = { new: [], existing: [], updates: [], errors: [] };
+
+    sourceData.forEach((row, idx) => {
+      const prepared = prepareRecord(row);
+      let existingRecord = null;
+      let matchedField = null;
+
+      // Check each unique field for matches
+      for (const field of currentTableConfig.uniqueFields) {
+        const value = prepared[field];
+        if (value) {
+          const normalizedValue = String(value).trim().toLowerCase();
+          const match = lookups[field].get(normalizedValue);
+          if (match) {
+            existingRecord = match;
+            matchedField = field;
+            break;
+          }
+        }
+      }
+
+      if (existingRecord) {
+        preview.existing.push({
+          sourceIndex: idx,
+          sourceData: prepared,
+          existingRecord,
+          matchedField,
+          matchedValue: prepared[matchedField]
+        });
+      } else {
+        // Validate required fields
+        const missingRequired = [];
+        Object.entries(currentTableConfig.fields).forEach(([fieldName, config]) => {
+          if (config.required && !prepared[fieldName]) {
+            missingRequired.push(fieldName);
+          }
+        });
+
+        if (missingRequired.length > 0) {
+          preview.errors.push({
+            sourceIndex: idx,
+            sourceData: prepared,
+            error: `Missing required fields: ${missingRequired.join(', ')}`
+          });
+        } else {
+          preview.new.push({
+            sourceIndex: idx,
+            sourceData: prepared
+          });
+        }
+      }
+    });
+
+    setSyncPreview(preview);
+    addLog(`Duplicate check complete:`, 'success');
+    addLog(`  - ${preview.new.length} new records to create`, 'info');
+    addLog(`  - ${preview.existing.length} existing records (will skip)`, 'warning');
+    addLog(`  - ${preview.errors.length} records with errors`, preview.errors.length > 0 ? 'error' : 'info');
+  };
+
+  // Sync new records to Airtable
+  const syncNewRecords = async () => {
+    if (syncPreview.new.length === 0) {
+      addLog('No new records to sync', 'warning');
+      return;
+    }
+
+    if (!apiKey || !baseId) {
+      addLog('Please enter API key and Base ID', 'error');
+      return;
+    }
+
+    setLoading(true);
+    const total = syncPreview.new.length;
+    let created = 0;
+    let failed = 0;
+
+    addLog(`Starting sync of ${total} new records...`, 'info');
+
+    try {
+      const client = new AirtableClient(apiKey, baseId);
+      const recordsToCreate = syncPreview.new.map(r => r.sourceData);
+
+      // Process in batches of 10
+      for (let i = 0; i < recordsToCreate.length; i += 10) {
+        const batch = recordsToCreate.slice(i, i + 10);
+        setProgress({ current: i, total, phase: 'Creating records' });
+
+        try {
+          const results = await client.createRecords(currentTableConfig.name, batch);
+          created += results.length;
+          addLog(`Created batch ${Math.floor(i/10) + 1}: ${results.length} records`, 'success');
+        } catch (err) {
+          failed += batch.length;
+          addLog(`Batch ${Math.floor(i/10) + 1} failed: ${err.message}`, 'error');
+        }
+      }
+
+      setProgress({ current: total, total, phase: 'Complete' });
+      addLog(`Sync complete: ${created} created, ${failed} failed`, created > 0 ? 'success' : 'warning');
+
+      // Refresh existing records
+      await fetchExistingRecords();
+      checkDuplicates();
+    } catch (err) {
+      addLog(`Sync error: ${err.message}`, 'error');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Sync test batch (first 5 records)
+  const syncTestBatch = async () => {
+    if (syncPreview.new.length === 0) {
+      addLog('No new records to test sync', 'warning');
+      return;
+    }
+
+    if (!apiKey || !baseId) {
+      addLog('Please enter API key and Base ID', 'error');
+      return;
+    }
+
+    setLoading(true);
+    const testRecords = syncPreview.new.slice(0, 5);
+
+    addLog(`Testing sync with ${testRecords.length} records...`, 'info');
+
+    try {
+      const client = new AirtableClient(apiKey, baseId);
+      const recordsToCreate = testRecords.map(r => r.sourceData);
+
+      const results = await client.createRecords(currentTableConfig.name, recordsToCreate);
+      addLog(`Test sync successful: ${results.length} records created`, 'success');
+
+      results.forEach((r, i) => {
+        addLog(`  Created: ${r.id} - ${r.fields['First Name'] || r.fields['Client'] || 'Record'} ${r.fields['Family Name'] || ''}`, 'info');
+      });
+
+      // Refresh existing records
+      await fetchExistingRecords();
+      checkDuplicates();
+    } catch (err) {
+      addLog(`Test sync error: ${err.message}`, 'error');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Render stats
+  const renderStats = () => (
+    <div className="stats-grid">
+      <div className="stat-card">
+        <div className="number">{sourceData.length}</div>
+        <div className="label">Source Records</div>
+      </div>
+      <div className="stat-card info">
+        <div className="number">{existingRecords.length}</div>
+        <div className="label">Existing in Airtable</div>
+      </div>
+      <div className="stat-card">
+        <div className="number">{syncPreview.new.length}</div>
+        <div className="label">New (to create)</div>
+      </div>
+      <div className="stat-card warning">
+        <div className="number">{syncPreview.existing.length}</div>
+        <div className="label">Duplicates (skip)</div>
+      </div>
+      <div className="stat-card danger">
+        <div className="number">{syncPreview.errors.length}</div>
+        <div className="label">Errors</div>
+      </div>
+    </div>
+  );
+
+  // Render preview table
+  const renderPreviewTable = (records, type) => {
+    if (records.length === 0) {
+      return <p style={{ color: '#94a3b8', fontStyle: 'italic' }}>No records</p>;
+    }
+
+    const displayFields = Object.keys(currentTableConfig.fields).slice(0, 6);
+
+    return (
+      <div className="table-container">
+        <table>
+          <thead>
+            <tr>
+              <th>Status</th>
+              {displayFields.map(f => <th key={f}>{f}</th>)}
+              {type === 'existing' && <th>Matched On</th>}
+              {type === 'error' && <th>Error</th>}
+            </tr>
+          </thead>
+          <tbody>
+            {records.slice(0, 50).map((r, idx) => (
+              <tr key={idx}>
+                <td>
+                  <span className={`badge ${type === 'new' ? 'new' : type === 'existing' ? 'exists' : 'error'}`}>
+                    {type === 'new' ? 'NEW' : type === 'existing' ? 'EXISTS' : 'ERROR'}
+                  </span>
+                </td>
+                {displayFields.map(f => (
+                  <td key={f} title={String(r.sourceData[f] || '')}>
+                    {String(r.sourceData[f] || '').slice(0, 30)}
+                  </td>
+                ))}
+                {type === 'existing' && <td>{r.matchedField}: {r.matchedValue}</td>}
+                {type === 'error' && <td style={{ color: '#ef4444' }}>{r.error}</td>}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {records.length > 50 && (
+          <p style={{ color: '#94a3b8', marginTop: '10px' }}>
+            Showing 50 of {records.length} records
+          </p>
+        )}
+      </div>
+    );
+  };
+
+  return (
+    <div className="container">
+      <h1>Airtable Sync - Data Mapping & Deduplication</h1>
+      <p className="subtitle">
+        Carefully map and sync data to Airtable with duplicate checking. ICH Atty: {ICH_ATTY_RECORD_ID}
+      </p>
+
+      {/* Configuration Card */}
+      <div className="card">
+        <h2>Airtable Configuration</h2>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '15px' }}>
+          <div className="input-group">
+            <label>API Key (Personal Access Token)</label>
+            <input
+              type="password"
+              value={apiKey}
+              onChange={(e) => setApiKey(e.target.value)}
+              placeholder="pat..."
+            />
+          </div>
+          <div className="input-group">
+            <label>Base ID</label>
+            <input
+              type="text"
+              value={baseId}
+              onChange={(e) => setBaseId(e.target.value)}
+              placeholder="app..."
+            />
+          </div>
+          <div className="input-group">
+            <label>Target Table</label>
+            <select value={activeTable} onChange={(e) => setActiveTable(e.target.value)}>
+              {Object.entries(AIRTABLE_CONFIG.tables).map(([key, config]) => (
+                <option key={key} value={key}>{config.name}</option>
+              ))}
+            </select>
+          </div>
+        </div>
+        <div className="btn-group" style={{ marginTop: '15px' }}>
+          <button
+            className="primary"
+            onClick={fetchExistingRecords}
+            disabled={loading || !apiKey || !baseId}
+          >
+            {loading ? 'Loading...' : 'Fetch Existing Records'}
+          </button>
+        </div>
+      </div>
+
+      {/* Stats */}
+      {renderStats()}
+
+      {/* Tabs */}
+      <div className="tabs">
+        <button className={`tab ${activeTab === 'upload' ? 'active' : ''}`} onClick={() => setActiveTab('upload')}>
+          Upload Data
+        </button>
+        <button className={`tab ${activeTab === 'preview' ? 'active' : ''}`} onClick={() => setActiveTab('preview')}>
+          Preview & Sync
+        </button>
+        <button className={`tab ${activeTab === 'mapping' ? 'active' : ''}`} onClick={() => setActiveTab('mapping')}>
+          Field Mapping
+        </button>
+        <button className={`tab ${activeTab === 'logs' ? 'active' : ''}`} onClick={() => setActiveTab('logs')}>
+          Logs ({logs.length})
+        </button>
+      </div>
+
+      {/* Upload Tab */}
+      {activeTab === 'upload' && (
+        <div className="card">
+          <h2>Upload Source Data</h2>
+          <label
+            className={`upload-zone ${fileName ? 'has-file' : ''}`}
+            onDragOver={(e) => { e.preventDefault(); e.currentTarget.classList.add('dragover'); }}
+            onDragLeave={(e) => e.currentTarget.classList.remove('dragover')}
+            onDrop={(e) => {
+              e.preventDefault();
+              e.currentTarget.classList.remove('dragover');
+              if (e.dataTransfer.files[0]) handleFileUpload(e.dataTransfer.files[0]);
+            }}
+          >
+            <input
+              type="file"
+              accept=".csv,.tsv,.xlsx,.xls"
+              onChange={(e) => e.target.files[0] && handleFileUpload(e.target.files[0])}
+            />
+            {fileName ? (
+              <div>
+                <div style={{ color: '#10b981', fontWeight: 'bold' }}>{fileName}</div>
+                <div style={{ color: '#94a3b8' }}>{sourceData.length} records loaded</div>
+              </div>
+            ) : (
+              <div>
+                <div style={{ fontWeight: 'bold', marginBottom: '5px' }}>Drop CSV/Excel file here</div>
+                <div style={{ color: '#94a3b8' }}>or click to select</div>
+              </div>
+            )}
+          </label>
+
+          {sourceData.length > 0 && (
+            <div style={{ marginTop: '20px' }}>
+              <h3>Source Data Preview</h3>
+              <div className="table-container">
+                <table>
+                  <thead>
+                    <tr>
+                      {Object.keys(sourceData[0] || {}).slice(0, 8).map(h => <th key={h}>{h}</th>)}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {sourceData.slice(0, 10).map((row, idx) => (
+                      <tr key={idx}>
+                        {Object.keys(sourceData[0] || {}).slice(0, 8).map(h => (
+                          <td key={h} title={String(row[h] || '')}>{String(row[h] || '').slice(0, 25)}</td>
+                        ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <div className="btn-group" style={{ marginTop: '15px' }}>
+                <button className="primary" onClick={checkDuplicates} disabled={loading}>
+                  Check for Duplicates
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Preview & Sync Tab */}
+      {activeTab === 'preview' && (
+        <div className="card">
+          <h2>Sync Preview</h2>
+
+          {progress.total > 0 && (
+            <div style={{ marginBottom: '20px' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '5px' }}>
+                <span>{progress.phase}</span>
+                <span>{progress.current} / {progress.total}</span>
+              </div>
+              <div className="progress-bar">
+                <div className="fill" style={{ width: `${(progress.current / progress.total) * 100}%` }} />
+              </div>
+            </div>
+          )}
+
+          <div className="btn-group" style={{ marginBottom: '20px' }}>
+            <button className="warning" onClick={syncTestBatch} disabled={loading || syncPreview.new.length === 0}>
+              Test Sync (First 5)
+            </button>
+            <button className="success" onClick={syncNewRecords} disabled={loading || syncPreview.new.length === 0}>
+              Sync All New Records ({syncPreview.new.length})
+            </button>
+            <button className="primary" onClick={checkDuplicates} disabled={loading || sourceData.length === 0}>
+              Re-check Duplicates
+            </button>
+          </div>
+
+          <h3 style={{ color: '#10b981' }}>New Records ({syncPreview.new.length})</h3>
+          {renderPreviewTable(syncPreview.new, 'new')}
+
+          <h3 style={{ color: '#f59e0b', marginTop: '20px' }}>Existing (Will Skip) ({syncPreview.existing.length})</h3>
+          {renderPreviewTable(syncPreview.existing, 'existing')}
+
+          {syncPreview.errors.length > 0 && (
+            <>
+              <h3 style={{ color: '#ef4444', marginTop: '20px' }}>Errors ({syncPreview.errors.length})</h3>
+              {renderPreviewTable(syncPreview.errors, 'error')}
+            </>
+          )}
+        </div>
+      )}
+
+      {/* Field Mapping Tab */}
+      {activeTab === 'mapping' && (
+        <div className="card">
+          <h2>Field Mapping for {currentTableConfig.name}</h2>
+          <p style={{ color: '#94a3b8', marginBottom: '15px' }}>
+            Unique fields used for deduplication: <strong>{currentTableConfig.uniqueFields.join(', ') || 'None'}</strong>
+          </p>
+          <div className="table-container">
+            <table>
+              <thead>
+                <tr>
+                  <th>Airtable Field</th>
+                  <th>Type</th>
+                  <th>Required</th>
+                  <th>Normalization</th>
+                  <th>Default Value</th>
+                </tr>
+              </thead>
+              <tbody>
+                {Object.entries(currentTableConfig.fields).map(([field, config]) => (
+                  <tr key={field}>
+                    <td style={{ fontWeight: config.required ? 'bold' : 'normal' }}>{field}</td>
+                    <td>
+                      <span className="badge" style={{ background: '#334155' }}>{config.type}</span>
+                    </td>
+                    <td>{config.required ? '✓' : ''}</td>
+                    <td>{config.normalize || '-'}</td>
+                    <td>
+                      {config.defaultValue !== undefined
+                        ? (typeof config.defaultValue === 'boolean'
+                            ? (config.defaultValue ? 'TRUE' : 'FALSE')
+                            : String(config.defaultValue))
+                        : '-'}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <div style={{ marginTop: '20px', padding: '15px', background: '#1e293b', borderRadius: '8px' }}>
+            <h4 style={{ color: '#a5b4fc', marginBottom: '10px' }}>ICH Attorney Configuration</h4>
+            <p style={{ color: '#94a3b8' }}>
+              All Client Info records will automatically have ICH Atty set to:
+            </p>
+            <code style={{ display: 'block', marginTop: '10px', padding: '10px', background: '#0f172a', borderRadius: '4px' }}>
+              {ICH_ATTY_RECORD_ID}
+            </code>
+          </div>
+        </div>
+      )}
+
+      {/* Logs Tab */}
+      {activeTab === 'logs' && (
+        <div className="card">
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '15px' }}>
+            <h2>Activity Log</h2>
+            <button className="danger" onClick={clearLogs}>Clear Logs</button>
+          </div>
+          <div className="log-container" ref={logContainerRef}>
+            {logs.length === 0 ? (
+              <div style={{ color: '#94a3b8', fontStyle: 'italic' }}>No log entries yet</div>
+            ) : (
+              logs.map((log, idx) => (
+                <div key={idx} className={`log-entry ${log.type}`}>
+                  <span style={{ color: '#64748b' }}>[{log.timestamp}]</span> {log.message}
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(<AirtableSync />);
+  </script>
+</body>
+</html>
