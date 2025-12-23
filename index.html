@@ -181,6 +181,58 @@ const normalizeName = (lastName, firstName) => {
   return `${clean(lastName)}|${clean(firstName)}`;
 };
 
+// Normalize date to YYYY-MM-DD format for Airtable
+const normalizeDate = (value) => {
+  if (!value) return '';
+  const trimmed = value.trim();
+  if (!trimmed) return '';
+
+  // Already in ISO format (YYYY-MM-DD)
+  if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
+    return trimmed;
+  }
+
+  // Try MM/DD/YYYY format (common in Clio exports)
+  const slashParts = trimmed.split('/');
+  if (slashParts.length === 3) {
+    const [m, d, y] = slashParts;
+    const month = m.padStart(2, '0');
+    const day = d.padStart(2, '0');
+    // Handle 2-digit years
+    let year = y;
+    if (y.length === 2) {
+      year = parseInt(y) > 50 ? '19' + y : '20' + y;
+    }
+    if (month >= '01' && month <= '12' && day >= '01' && day <= '31') {
+      return `${year}-${month}-${day}`;
+    }
+  }
+
+  // Try MM-DD-YYYY format
+  const dashParts = trimmed.split('-');
+  if (dashParts.length === 3 && dashParts[0].length <= 2) {
+    const [m, d, y] = dashParts;
+    const month = m.padStart(2, '0');
+    const day = d.padStart(2, '0');
+    let year = y;
+    if (y.length === 2) {
+      year = parseInt(y) > 50 ? '19' + y : '20' + y;
+    }
+    if (month >= '01' && month <= '12' && day >= '01' && day <= '31') {
+      return `${year}-${month}-${day}`;
+    }
+  }
+
+  // Try to parse with Date constructor as fallback
+  const date = new Date(trimmed);
+  if (!isNaN(date.getTime())) {
+    return date.toISOString().split('T')[0];
+  }
+
+  // Return original if we can't parse
+  return trimmed;
+};
+
 // Extract A# from text
 const extractANumber = (text) => {
   if (!text) return null;
@@ -1324,8 +1376,8 @@ function ClioAirtableMerger() {
         }
       }
 
-      // Extract other fields from sheet data
-      const dob = findFieldInSheetData(client.sheetData, FIELD_PATTERNS.dob);
+      // Extract other fields from sheet data (normalize dates to YYYY-MM-DD)
+      const dob = normalizeDate(findFieldInSheetData(client.sheetData, FIELD_PATTERNS.dob));
       const rawANumber = client.aNumber || '';
       const aNumberResult = normalizeANumber(rawANumber);
       const nameKey = normalizeName(lastName, firstName);
@@ -1379,7 +1431,7 @@ function ClioAirtableMerger() {
         city: findFieldInSheetData(client.sheetData, FIELD_PATTERNS.city),
         zip: findFieldInSheetData(client.sheetData, FIELD_PATTERNS.zip),
         country: findFieldInSheetData(client.sheetData, FIELD_PATTERNS.country),
-        entryDate: findFieldInSheetData(client.sheetData, FIELD_PATTERNS.entryDate),
+        entryDate: normalizeDate(findFieldInSheetData(client.sheetData, FIELD_PATTERNS.entryDate)),
         placeOfEntry: findFieldInSheetData(client.sheetData, FIELD_PATTERNS.placeOfEntry),
         dob: dob,
         clioContactId: '', // Will be populated from Clio Contacts
@@ -1517,9 +1569,9 @@ function ClioAirtableMerger() {
         }
 
         if (record) {
-          // Phone enrichment - priority: Mobile > Primary > Business > Home
+          // Phone enrichment - priority: Mobile > Primary > Home > Business > Other > Business2 > Home2
           if (!record.phone) {
-            record.phone = row['Mobile Phone'] || row['Primary Phone'] || row['Business Phone'] || row['Home Phone'] || '';
+            record.phone = row['Mobile Phone'] || row['Primary Phone'] || row['Home Phone'] || row['Business Phone'] || row['Other Phone'] || row['Business Phone 2'] || row['Home Phone 2'] || '';
           }
 
           // Email enrichment - with fallback to secondary email
@@ -1554,9 +1606,9 @@ function ClioAirtableMerger() {
             record.country = row['Home Country/Region'] || row['Business Country/Region'] || row['Billing Country/Region'] || row['Other Country/Region'] || '';
           }
 
-          // DOB enrichment from Clio Birthday field
+          // DOB enrichment from Clio Birthday field (normalize to YYYY-MM-DD)
           if (!record.dob && row['Birthday']) {
-            record.dob = row['Birthday'];
+            record.dob = normalizeDate(row['Birthday']);
           }
 
           record.clioContactId = row['UniqueId'] || '';
