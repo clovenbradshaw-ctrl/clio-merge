@@ -287,10 +287,27 @@ const generateCSV = (headers, rows) => {
 // BAHR EXCEL PARSER - Extract clients from multi-tab Excel
 // ============================================
 
-// Column name variations for client identification
-const CLIENT_NAME_COLUMNS = ['Client', 'Client Name', 'Client ', 'Name'];
-const A_NUMBER_COLUMNS = ['A Number', 'A- Number', 'A#', 'A Number ', 'A-Number', 'Alien Number'];
-const MATTER_COLUMNS = ['Matter', 'Case Matter', 'Matter Number'];
+// Column name variations for client identification (will be matched case-insensitively)
+const CLIENT_NAME_PATTERNS = [
+  'client', 'client name', 'name', 'full name', 'fullname',
+  // Spanish variations (including common typos)
+  'nombre del cliente', 'nombre del ciente', 'nombre', 'cliente',
+  'nombre completo', 'nombre del client',
+];
+const A_NUMBER_PATTERNS = [
+  'a number', 'a- number', 'a#', 'a-number', 'alien number', 'a #',
+  'anumber', 'a num', 'a-num',
+  // Spanish
+  'numero a', 'número a', 'numero alien', 'número alien', 'num a',
+];
+const MATTER_PATTERNS = [
+  'matter', 'case matter', 'matter number', 'matter no',
+  // Spanish
+  'caso', 'número de caso', 'numero de caso', 'materia', 'asunto',
+];
+
+// Generic column names to skip when looking for real headers
+const GENERIC_COLUMN_PATTERNS = /^(column\s*\d+|col\s*\d+|field\s*\d+|__empty|__rownum)$/i;
 
 // Extract client name from a Matter field like "01453-Castillo Garcia"
 const extractClientFromMatter = (matter) => {
@@ -314,6 +331,18 @@ const normalizeClientName = (name) => {
   return cleaned;
 };
 
+// Normalize column name for comparison
+const normalizeColumnName = (col) => {
+  if (!col) return '';
+  return String(col).toLowerCase().trim().replace(/\s+/g, ' ').normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+};
+
+// Check if a column name matches any of the patterns
+const columnMatches = (colName, patterns) => {
+  const normalized = normalizeColumnName(colName);
+  return patterns.some(pattern => normalized === pattern || normalized.includes(pattern));
+};
+
 // Extract A# from various formats
 const extractANumberFromCell = (value) => {
   if (!value) return null;
@@ -330,34 +359,91 @@ const extractANumberFromCell = (value) => {
   return null;
 };
 
-// Find a column value trying multiple possible column names
-const findColumnValue = (row, columnVariants) => {
-  for (const col of columnVariants) {
-    if (row[col] !== undefined && row[col] !== null && String(row[col]).trim() !== '') {
-      return String(row[col]).trim();
+// Find a column value trying multiple possible column name patterns (case-insensitive)
+const findColumnValue = (row, patterns) => {
+  for (const [colName, value] of Object.entries(row)) {
+    if (columnMatches(colName, patterns)) {
+      if (value !== undefined && value !== null && String(value).trim() !== '') {
+        return String(value).trim();
+      }
     }
   }
   return null;
 };
 
+// Check if row has generic column headers (Column 1, Column 2, etc.)
+const hasGenericHeaders = (headers) => {
+  if (!headers || headers.length === 0) return false;
+  const genericCount = headers.filter(h => GENERIC_COLUMN_PATTERNS.test(String(h))).length;
+  return genericCount >= headers.length * 0.5; // More than half are generic
+};
+
+// Find the real header row in sheet data (skips metadata rows)
+const findHeaderRow = (jsonData) => {
+  // Check if first row has generic headers
+  if (jsonData.length === 0) return { headerRow: 0, data: jsonData };
+
+  const firstRowHeaders = Object.keys(jsonData[0]);
+
+  if (hasGenericHeaders(firstRowHeaders)) {
+    // Look for a row that looks like headers (contains recognizable column names)
+    for (let i = 0; i < Math.min(jsonData.length, 10); i++) {
+      const row = jsonData[i];
+      const values = Object.values(row).map(v => String(v || '').trim());
+
+      // Check if this row contains recognizable header names
+      const hasClientCol = values.some(v => columnMatches(v, CLIENT_NAME_PATTERNS));
+      const hasANumCol = values.some(v => columnMatches(v, A_NUMBER_PATTERNS));
+      const hasMatterCol = values.some(v => columnMatches(v, MATTER_PATTERNS));
+
+      if (hasClientCol || hasANumCol || hasMatterCol) {
+        // This row looks like headers - rebuild data with these as column names
+        const newHeaders = values;
+        const newData = [];
+
+        for (let j = i + 1; j < jsonData.length; j++) {
+          const dataRow = jsonData[j];
+          const newRow = {};
+          const oldValues = Object.values(dataRow);
+
+          newHeaders.forEach((header, idx) => {
+            if (header && oldValues[idx] !== undefined) {
+              newRow[header] = oldValues[idx];
+            }
+          });
+
+          // Only include non-empty rows
+          if (Object.values(newRow).some(v => v !== undefined && v !== null && String(v).trim() !== '')) {
+            newData.push(newRow);
+          }
+        }
+
+        return { headerRow: i + 1, data: newData, detectedHeaders: newHeaders };
+      }
+    }
+  }
+
+  return { headerRow: 0, data: jsonData };
+};
+
 // Parse a single sheet and extract client records
-const parseSheetForClients = (sheetData, sheetName) => {
+const parseSheetForClients = (sheetData, sheetName, headerRowOffset = 0) => {
   const clients = [];
 
   sheetData.forEach((row, rowIdx) => {
-    // Try to find client identifier
-    let clientName = findColumnValue(row, CLIENT_NAME_COLUMNS);
+    // Try to find client identifier using patterns (case-insensitive)
+    let clientName = findColumnValue(row, CLIENT_NAME_PATTERNS);
     let aNumber = null;
 
     // Try to extract A# from dedicated columns
-    const rawANumber = findColumnValue(row, A_NUMBER_COLUMNS);
+    const rawANumber = findColumnValue(row, A_NUMBER_PATTERNS);
     if (rawANumber) {
       aNumber = extractANumberFromCell(rawANumber);
     }
 
     // If no client name, try to extract from Matter column
     if (!clientName) {
-      const matter = findColumnValue(row, MATTER_COLUMNS);
+      const matter = findColumnValue(row, MATTER_PATTERNS);
       if (matter) {
         clientName = extractClientFromMatter(matter);
       }
@@ -370,8 +456,8 @@ const parseSheetForClients = (sheetData, sheetName) => {
     const data = {};
     Object.entries(row).forEach(([key, value]) => {
       if (value !== undefined && value !== null && String(value).trim() !== '') {
-        // Skip internal fields
-        if (!key.startsWith('__')) {
+        // Skip internal fields and generic column names
+        if (!key.startsWith('__') && !GENERIC_COLUMN_PATTERNS.test(key)) {
           data[key] = String(value).trim();
         }
       }
@@ -379,7 +465,7 @@ const parseSheetForClients = (sheetData, sheetName) => {
 
     clients.push({
       sheetName,
-      rowIndex: rowIdx + 2, // 1-indexed + header row
+      rowIndex: rowIdx + 2 + headerRowOffset, // 1-indexed + header row + offset
       clientName: clientName || '(Unknown)',
       normalizedName: normalizeClientName(clientName),
       aNumber,
@@ -750,30 +836,40 @@ function ClioAirtableMerger() {
         // Process each sheet
         workbook.SheetNames.forEach(sheetName => {
           const worksheet = workbook.Sheets[sheetName];
-          const jsonData = XLSX.utils.sheet_to_json(worksheet, { defval: '' });
+          const rawJsonData = XLSX.utils.sheet_to_json(worksheet, { defval: '' });
 
-          if (jsonData.length === 0) {
+          if (rawJsonData.length === 0) {
             reports.push({ type: 'warning', message: `Sheet "${sheetName}": empty, skipped` });
             return;
           }
 
+          // Find real header row (handles "Column 1", "Column 2" etc)
+          const { headerRow, data: jsonData, detectedHeaders } = findHeaderRow(rawJsonData);
+
+          if (jsonData.length === 0) {
+            reports.push({ type: 'warning', message: `Sheet "${sheetName}": no data after header detection, skipped` });
+            return;
+          }
+
           // Get column headers
-          const headers = Object.keys(jsonData[0] || {});
+          const headers = detectedHeaders || Object.keys(jsonData[0] || {});
 
           allSheets.push({
             name: sheetName,
             rowCount: jsonData.length,
             headers,
             data: jsonData,
+            headerRowOffset: headerRow,
           });
 
           // Extract clients from this sheet
-          const clientsFromSheet = parseSheetForClients(jsonData, sheetName);
+          const clientsFromSheet = parseSheetForClients(jsonData, sheetName, headerRow);
           allClientRecords.push(...clientsFromSheet);
 
+          const headerNote = headerRow > 0 ? ` (headers in row ${headerRow + 1})` : '';
           reports.push({
             type: 'success',
-            message: `Sheet "${sheetName}": ${jsonData.length} rows, ${clientsFromSheet.length} clients found`
+            message: `Sheet "${sheetName}": ${jsonData.length} rows, ${clientsFromSheet.length} clients found${headerNote}`
           });
         });
 
@@ -1661,10 +1757,14 @@ function ClioAirtableMerger() {
                     <li>View merged data or download flattened CSV</li>
                   </ol>
                   <div style={{ marginTop: '1rem', fontSize: '0.8rem', color: '#71717a' }}>
-                    <strong>Recognized columns:</strong><br/>
-                    Client names: {CLIENT_NAME_COLUMNS.join(', ')}<br/>
-                    A# columns: {A_NUMBER_COLUMNS.join(', ')}<br/>
-                    Matter fields: {MATTER_COLUMNS.join(', ')} (extracts name from "01453-Name" format)
+                    <strong>Recognized columns (case-insensitive):</strong><br/>
+                    Client names: {CLIENT_NAME_PATTERNS.slice(0, 6).join(', ')}...<br/>
+                    A# columns: {A_NUMBER_PATTERNS.slice(0, 6).join(', ')}...<br/>
+                    Matter fields: {MATTER_PATTERNS.slice(0, 4).join(', ')}... (extracts name from "01453-Name" format)<br/>
+                    <br/>
+                    <strong>Smart features:</strong><br/>
+                    • Auto-detects header row (skips "Column 1", "Column 2" generic headers)<br/>
+                    • Supports Spanish column names (Nombre del Cliente, etc.)
                   </div>
                 </div>
               )}
