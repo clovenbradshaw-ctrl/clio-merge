@@ -1236,6 +1236,8 @@ function ClioAirtableMerger() {
     // Enrich with Clio Contacts
     let contactMatches = 0;
     let contactMisses = 0;
+    const unmatchedClioSamples = [];
+    const matchedSamples = [];
 
     if (phase1Data.clioContacts?.rows) {
       phase1Data.clioContacts.rows.forEach((row) => {
@@ -1245,12 +1247,14 @@ function ClioAirtableMerger() {
 
         // Try exact match first
         let record = bahrLookup.get(nameKey);
+        let matchType = 'exact';
 
         // Fallback: try first word only of firstName (handles "Juan Carlos" vs "Juan")
         if (!record && firstName.includes(' ')) {
           const firstWordOnly = firstName.split(' ')[0];
           const firstWordKey = normalizeName(lastName, firstWordOnly);
           record = bahrLookup.get(firstWordKey);
+          matchType = 'first-word';
         }
 
         if (record) {
@@ -1259,12 +1263,42 @@ function ClioAirtableMerger() {
           if (!record.email && row['E-mail Address']) record.email = row['E-mail Address'];
           record.clioContactId = row['UniqueId'] || '';
           contactMatches++;
+          if (matchedSamples.length < 5) {
+            matchedSamples.push({ clio: `${lastName}, ${firstName}`, bahr: record._nameKey, type: matchType });
+          }
         } else {
           contactMisses++;
+          if (unmatchedClioSamples.length < 20) {
+            unmatchedClioSamples.push({ lastName, firstName, nameKey });
+          }
         }
       });
 
       reports.push({ type: 'info', message: `Matched ${contactMatches} Clio contacts, ${contactMisses} unmatched` });
+
+      // Debug: show sample matches
+      if (matchedSamples.length > 0) {
+        reports.push({ type: 'success', message: `Sample matches:` });
+        matchedSamples.forEach(s => {
+          reports.push({ type: 'info', message: `  ✓ Clio "${s.clio}" → BAHR key "${s.bahr}" (${s.type})` });
+        });
+      }
+
+      // Debug: show sample unmatched Clio contacts
+      if (unmatchedClioSamples.length > 0) {
+        reports.push({ type: 'warning', message: `Sample unmatched Clio contacts (showing ${unmatchedClioSamples.length}):` });
+        unmatchedClioSamples.forEach(s => {
+          reports.push({ type: 'info', message: `  ✗ "${s.lastName}, ${s.firstName}" → key "${s.nameKey}"` });
+        });
+      }
+
+      // Debug: show sample BAHR keys for comparison
+      const bahrKeysSample = Array.from(bahrLookup.keys()).slice(0, 20);
+      reports.push({ type: 'info', message: `Sample BAHR lookup keys (${bahrLookup.size} total):` });
+      bahrKeysSample.forEach(k => {
+        const rec = bahrLookup.get(k);
+        reports.push({ type: 'info', message: `  BAHR: "${rec.lastName}, ${rec.firstName}" → key "${k}"` });
+      });
     }
 
     // Build output
