@@ -22,7 +22,7 @@ const XANO_CASE_NOTES_ENDPOINT = 'https://xvkq-pq7i-idtl.n7d.xano.io/api:l_gEBOG
 
 // Relevant Airtable tables for schema inspection
 const AIRTABLE_TABLES = {
-  'Client Info': ['Client ID', 'A#', 'First Name', 'Middle Name', 'Family Name', 'Phone Number', 'Client Email', 'Address Line 1', 'Address Line 2', 'City', 'State', 'Zip (5)', 'Country', 'Entry Date', 'Place of Entry', 'DOB', 'clio_contact_id', 'ICH Atty', 'Bahr Client'],
+  'Client Info': ['Client ID', 'A#', 'First Name', 'Middle Name', 'Family Name', 'Phone Number', 'Client Email', 'Address Line 1', 'Address Line 2', 'City', 'State', 'Zip (5)', 'Country', 'Entry Date', 'Place of Entry', 'DOB', 'clio_contact_id', 'ICH Atty', 'Bahr Client', 'uscis_flatpack_data'],
   'Case Master View': ['Client', 'clio_matter_id', 'PP ID', 'Description', 'File Case Status', 'Case Notes', 'Bahr Client'],
   'Events': ['Case Master', 'A#', 'Hearing Date/Time', 'Event Type', 'Event Hearing Type', 'Court', 'Judge', 'MCH Attny', 'Bahr Client'],
   'Relationships': ['Case Master View', 'Object Client', 'Relationship', 'Bahr Client'],
@@ -1072,6 +1072,41 @@ function ClioAirtableMerger() {
     let invalidANumbers = 0;
     let missingANumbers = 0;
 
+    // Build flatpack lookup from bahrMergedClients (Phase 0 Excel data)
+    const flatpackByANumber = new Map();
+    const flatpackByName = new Map();
+
+    bahrMergedClients.forEach(client => {
+      // Build the flatpack data object (sheet data grouped by sheet name)
+      const flatpackData = {};
+      Object.entries(client.sheetData).forEach(([sheetName, records]) => {
+        flatpackData[sheetName] = records.map(record => record.data);
+      });
+
+      const flatpackObj = {
+        clientName: client.primaryName,
+        aNumber: client.aNumber || '',
+        allNames: client.names,
+        ...flatpackData
+      };
+
+      if (client.aNumber) {
+        flatpackByANumber.set(client.aNumber, flatpackObj);
+      }
+      // Also index by normalized name for fallback matching
+      client.names.forEach(name => {
+        const normalized = normalizeName(
+          name.split(',')[0]?.trim() || name.split(' ').pop() || '',
+          name.split(',')[1]?.trim() || name.split(' ')[0] || ''
+        );
+        if (normalized && !flatpackByName.has(normalized)) {
+          flatpackByName.set(normalized, flatpackObj);
+        }
+      });
+    });
+
+    reports.push({ type: 'info', message: `Loaded ${bahrMergedClients.length} clients from Phase 0 flatpack data` });
+
     // Build Bahr lookup
     if (phase1Data.bahr?.rows) {
       phase1Data.bahr.rows.forEach((row, idx) => {
@@ -1163,7 +1198,22 @@ function ClioAirtableMerger() {
     }
 
     // Build output
+    let flatpackMatches = 0;
+    let flatpackMisses = 0;
+
     bahrLookup.forEach((record) => {
+      // Look up flatpack data by A# first, then by name
+      let flatpackData = null;
+      if (record.aNumber && flatpackByANumber.has(record.aNumber)) {
+        flatpackData = flatpackByANumber.get(record.aNumber);
+        flatpackMatches++;
+      } else if (flatpackByName.has(record._nameKey)) {
+        flatpackData = flatpackByName.get(record._nameKey);
+        flatpackMatches++;
+      } else {
+        flatpackMisses++;
+      }
+
       clientsOutput.push({
         'Client ID': record._clientId,
         'A#': record.aNumber,
@@ -1184,12 +1234,18 @@ function ClioAirtableMerger() {
         'clio_contact_id': record.clioContactId,
         'ICH Atty': ANDREW_BAHR_RECORD_ID,
         'Bahr Client': 'TRUE',
+        'uscis_flatpack_data': flatpackData ? JSON.stringify(flatpackData) : '',
       });
+    });
+
+    reports.push({
+      type: flatpackMatches > 0 ? 'success' : 'warning',
+      message: `Flatpack data: ${flatpackMatches} matched, ${flatpackMisses} unmatched`
     });
 
     setPhase1Result({ clients: clientsOutput });
     setPhase1Report(reports);
-  }, [phase1Data]);
+  }, [phase1Data, bahrMergedClients]);
 
   // Phase 2: Case Master Views
   const runPhase2 = useCallback(() => {
