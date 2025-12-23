@@ -1161,19 +1161,14 @@ function ClioAirtableMerger() {
       const aNumberResult = normalizeANumber(rawANumber);
       const nameKey = normalizeName(lastName, firstName);
 
-      let clientId = '';
       let aNumberStatus = '';
-
       if (aNumberResult.isValid) {
-        clientId = aNumberResult.normalized;
         aNumberStatus = 'valid';
         validANumbers++;
       } else if (!rawANumber) {
-        clientId = generateFallbackId(lastName, firstName, dob) || `PENDING-${idx}`;
         aNumberStatus = 'missing';
         missingANumbers++;
       } else {
-        clientId = generateFallbackId(lastName, firstName, dob) || `PENDING-${idx}`;
         aNumberStatus = 'invalid';
         invalidANumbers++;
         reports.push({
@@ -1195,9 +1190,12 @@ function ClioAirtableMerger() {
         ...flatpackData
       };
 
+      // Always generate Client ID (never use A# as ID)
+      const generatedClientId = generateFallbackId(lastName, firstName, dob) || `PENDING-${idx}`;
+
       const record = {
         _nameKey: nameKey,
-        _clientId: clientId,
+        _clientId: generatedClientId,
         _aNumberStatus: aNumberStatus,
         _flatpackData: flatpackObj,
         lastName,
@@ -1218,7 +1216,15 @@ function ClioAirtableMerger() {
         clioContactId: '', // Will be populated from Clio Contacts
       };
 
+      // Store under multiple name keys for flexible matching
       bahrLookup.set(nameKey, record);
+      // Also store with firstName+middleName combined (handles Clio having full first name)
+      if (middleName) {
+        const fullFirstNameKey = normalizeName(lastName, `${firstName} ${middleName}`);
+        if (!bahrLookup.has(fullFirstNameKey)) {
+          bahrLookup.set(fullFirstNameKey, record);
+        }
+      }
     });
 
     reports.push({ type: 'info', message: `Built ${bahrLookup.size} client records from Phase 0 data` });
@@ -1230,6 +1236,8 @@ function ClioAirtableMerger() {
     // Enrich with Clio Contacts
     let contactMatches = 0;
     let contactMisses = 0;
+    const unmatchedClioSamples = [];
+    const matchedSamples = [];
 
     if (phase1Data.clioContacts?.rows) {
       phase1Data.clioContacts.rows.forEach((row) => {
@@ -1237,19 +1245,60 @@ function ClioAirtableMerger() {
         const firstName = row['First Name'] || '';
         const nameKey = normalizeName(lastName, firstName);
 
-        if (bahrLookup.has(nameKey)) {
-          const record = bahrLookup.get(nameKey);
+        // Try exact match first
+        let record = bahrLookup.get(nameKey);
+        let matchType = 'exact';
+
+        // Fallback: try first word only of firstName (handles "Juan Carlos" vs "Juan")
+        if (!record && firstName.includes(' ')) {
+          const firstWordOnly = firstName.split(' ')[0];
+          const firstWordKey = normalizeName(lastName, firstWordOnly);
+          record = bahrLookup.get(firstWordKey);
+          matchType = 'first-word';
+        }
+
+        if (record) {
           if (!record.phone && row['Mobile Phone']) record.phone = row['Mobile Phone'];
           if (!record.phone && row['Primary Phone']) record.phone = row['Primary Phone'];
           if (!record.email && row['E-mail Address']) record.email = row['E-mail Address'];
           record.clioContactId = row['UniqueId'] || '';
           contactMatches++;
+          if (matchedSamples.length < 5) {
+            matchedSamples.push({ clio: `${lastName}, ${firstName}`, bahr: record._nameKey, type: matchType });
+          }
         } else {
           contactMisses++;
+          if (unmatchedClioSamples.length < 20) {
+            unmatchedClioSamples.push({ lastName, firstName, nameKey });
+          }
         }
       });
 
       reports.push({ type: 'info', message: `Matched ${contactMatches} Clio contacts, ${contactMisses} unmatched` });
+
+      // Debug: show sample matches
+      if (matchedSamples.length > 0) {
+        reports.push({ type: 'success', message: `Sample matches:` });
+        matchedSamples.forEach(s => {
+          reports.push({ type: 'info', message: `  ✓ Clio "${s.clio}" → BAHR key "${s.bahr}" (${s.type})` });
+        });
+      }
+
+      // Debug: show sample unmatched Clio contacts
+      if (unmatchedClioSamples.length > 0) {
+        reports.push({ type: 'warning', message: `Sample unmatched Clio contacts (showing ${unmatchedClioSamples.length}):` });
+        unmatchedClioSamples.forEach(s => {
+          reports.push({ type: 'info', message: `  ✗ "${s.lastName}, ${s.firstName}" → key "${s.nameKey}"` });
+        });
+      }
+
+      // Debug: show sample BAHR keys for comparison
+      const bahrKeysSample = Array.from(bahrLookup.keys()).slice(0, 20);
+      reports.push({ type: 'info', message: `Sample BAHR lookup keys (${bahrLookup.size} total):` });
+      bahrKeysSample.forEach(k => {
+        const rec = bahrLookup.get(k);
+        reports.push({ type: 'info', message: `  BAHR: "${rec.lastName}, ${rec.firstName}" → key "${k}"` });
+      });
     }
 
     // Build output
