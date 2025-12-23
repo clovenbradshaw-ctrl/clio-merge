@@ -1041,7 +1041,10 @@ function ClioAirtableMerger() {
     const a = document.createElement('a');
     a.href = url;
     a.download = 'bahr_client_data.json';
+    a.style.display = 'none';
+    document.body.appendChild(a);
     a.click();
+    document.body.removeChild(a);
     URL.revokeObjectURL(url);
   };
 
@@ -1062,7 +1065,10 @@ function ClioAirtableMerger() {
     const a = document.createElement('a');
     a.href = url;
     a.download = 'bahr_client_summary.csv';
+    a.style.display = 'none';
+    document.body.appendChild(a);
     a.click();
+    document.body.removeChild(a);
     URL.revokeObjectURL(url);
   };
 
@@ -1143,10 +1149,26 @@ function ClioAirtableMerger() {
         lastName = findFieldInSheetData(client.sheetData, FIELD_PATTERNS.lastName);
         middleName = findFieldInSheetData(client.sheetData, FIELD_PATTERNS.middleName);
 
-        // Fallback: split the name
+        // Fallback: split the name intelligently for Spanish names
+        // Spanish naming convention: FirstName [MiddleName] PatronymicLastName MatronymicLastName
+        // e.g., "Aaron Alberto Villareal Tomasini" -> First: "Aaron Alberto", Last: "Villareal Tomasini"
         if (!firstName && !lastName) {
-          const parts = name.split(' ');
-          if (parts.length >= 2) {
+          const parts = name.split(' ').filter(p => p.length > 0);
+          if (parts.length >= 5) {
+            // 5+ words: take first 2 as given names, rest as family names
+            firstName = parts[0];
+            middleName = parts[1];
+            lastName = parts.slice(2).join(' ');
+          } else if (parts.length === 4) {
+            // 4 words: likely "First Middle PatronymicLast MatronymicLast"
+            firstName = parts[0];
+            middleName = parts[1];
+            lastName = parts.slice(2).join(' ');
+          } else if (parts.length === 3) {
+            // 3 words: "First Last1 Last2" or "First Middle Last"
+            firstName = parts[0];
+            lastName = parts.slice(1).join(' ');
+          } else if (parts.length >= 2) {
             firstName = parts[0];
             lastName = parts.slice(1).join(' ');
           } else {
@@ -1225,11 +1247,43 @@ function ClioAirtableMerger() {
           bahrLookup.set(fullFirstNameKey, record);
         }
       }
+      // Also store with last name only for last-name-only fallback matching
+      const lastNameOnlyKey = `LASTNAME_ONLY:${normalizeName(lastName, '').split('|')[0]}`;
+      if (!bahrLookup.has(lastNameOnlyKey)) {
+        bahrLookup.set(lastNameOnlyKey, record);
+      } else {
+        // Mark as ambiguous if multiple records have same last name
+        bahrLookup.set(lastNameOnlyKey, 'AMBIGUOUS');
+      }
+      // Store with condensed last name (no spaces) for "De Leon" vs "DeLeon" matching
+      const condensedLastName = lastName.replace(/\s+/g, '');
+      if (condensedLastName !== lastName) {
+        const condensedKey = normalizeName(condensedLastName, firstName);
+        if (!bahrLookup.has(condensedKey)) {
+          bahrLookup.set(condensedKey, record);
+        }
+      }
+      // Store with first word of last name only (handles "Villareal" vs "Villareal Tomasini")
+      if (lastName.includes(' ')) {
+        const firstLastWord = lastName.split(' ')[0];
+        const firstLastWordKey = normalizeName(firstLastWord, firstName);
+        if (!bahrLookup.has(firstLastWordKey)) {
+          bahrLookup.set(firstLastWordKey, record);
+        }
+        // Also with fullFirstName
+        if (middleName) {
+          const firstLastWordFullFirstKey = normalizeName(firstLastWord, `${firstName} ${middleName}`);
+          if (!bahrLookup.has(firstLastWordFullFirstKey)) {
+            bahrLookup.set(firstLastWordFullFirstKey, record);
+          }
+        }
+      }
     });
 
-    reports.push({ type: 'info', message: `Built ${bahrLookup.size} client records from Phase 0 data` });
+    const uniqueClientCount = bahrMergedClients.length;
+    reports.push({ type: 'info', message: `Built ${uniqueClientCount} client records from Phase 0 data (${bahrLookup.size} lookup keys)` });
     reports.push({
-      type: validANumbers === bahrLookup.size ? 'success' : 'warning',
+      type: validANumbers === uniqueClientCount ? 'success' : 'warning',
       message: `A# Validation: ${validANumbers} valid, ${invalidANumbers} malformed, ${missingANumbers} missing`
     });
 
@@ -1249,12 +1303,70 @@ function ClioAirtableMerger() {
         let record = bahrLookup.get(nameKey);
         let matchType = 'exact';
 
-        // Fallback: try first word only of firstName (handles "Juan Carlos" vs "Juan")
+        // Fallback 1: try first word only of firstName (handles "Juan Carlos" vs "Juan")
         if (!record && firstName.includes(' ')) {
           const firstWordOnly = firstName.split(' ')[0];
           const firstWordKey = normalizeName(lastName, firstWordOnly);
           record = bahrLookup.get(firstWordKey);
           matchType = 'first-word';
+        }
+
+        // Fallback 2: try condensed last name (no spaces) for "De Leon" vs "DeLeon"
+        if (!record) {
+          const condensedLastName = lastName.replace(/\s+/g, '');
+          if (condensedLastName !== lastName) {
+            const condensedKey = normalizeName(condensedLastName, firstName);
+            record = bahrLookup.get(condensedKey);
+            matchType = 'condensed-lastname';
+          }
+        }
+
+        // Fallback 3: try last word of firstName (in case BAHR has "Alberto" but Clio has "Aaron Alberto")
+        if (!record && firstName.includes(' ')) {
+          const words = firstName.split(' ');
+          const lastWordOnly = words[words.length - 1];
+          const lastWordKey = normalizeName(lastName, lastWordOnly);
+          record = bahrLookup.get(lastWordKey);
+          matchType = 'last-word';
+        }
+
+        // Fallback 4: try each word of firstName
+        if (!record && firstName.includes(' ')) {
+          const words = firstName.split(' ');
+          for (const word of words) {
+            const wordKey = normalizeName(lastName, word);
+            record = bahrLookup.get(wordKey);
+            if (record) {
+              matchType = 'any-word';
+              break;
+            }
+          }
+        }
+
+        // Fallback 5: try first word of lastName only (handles "Villareal" vs "Villareal Tomasini")
+        if (!record && lastName.includes(' ')) {
+          const firstLastWord = lastName.split(' ')[0];
+          const firstLastWordKey = normalizeName(firstLastWord, firstName);
+          record = bahrLookup.get(firstLastWordKey);
+          matchType = 'first-lastname-word';
+
+          // Also try first word with first-word-only firstName
+          if (!record && firstName.includes(' ')) {
+            const firstWordOnly = firstName.split(' ')[0];
+            const combinedKey = normalizeName(firstLastWord, firstWordOnly);
+            record = bahrLookup.get(combinedKey);
+            matchType = 'first-lastname-first-firstname';
+          }
+        }
+
+        // Fallback 6: last name only match (only if unique in BAHR)
+        if (!record) {
+          const lastNameOnlyKey = `LASTNAME_ONLY:${normalizeName(lastName, '').split('|')[0]}`;
+          const lastNameResult = bahrLookup.get(lastNameOnlyKey);
+          if (lastNameResult && lastNameResult !== 'AMBIGUOUS') {
+            record = lastNameResult;
+            matchType = 'lastname-only';
+          }
         }
 
         if (record) {
@@ -1623,7 +1735,10 @@ function ClioAirtableMerger() {
     const a = document.createElement('a');
     a.href = url;
     a.download = filename;
+    a.style.display = 'none';
+    document.body.appendChild(a);
     a.click();
+    document.body.removeChild(a);
     URL.revokeObjectURL(url);
   };
 
