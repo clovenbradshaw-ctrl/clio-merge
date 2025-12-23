@@ -346,6 +346,7 @@ const generateCSV = (headers, rows) => {
 // Column name variations for client identification (will be matched case-insensitively)
 const CLIENT_NAME_PATTERNS = [
   'client', 'client name', 'name', 'full name', 'fullname', 'client full name',
+  'full_name', // DocketWise format
   // Spanish variations (including common typos)
   'nombre del cliente', 'nombre del ciente', 'nombre', 'cliente',
   'nombre completo', 'nombre del client', 'nom del cliente',
@@ -354,6 +355,7 @@ const CLIENT_NAME_PATTERNS = [
 const A_NUMBER_PATTERNS = [
   'a number', 'a- number', 'a#', 'a-number', 'alien number', 'a #',
   'anumber', 'a num', 'a-num', 'a no', 'a-no', 'alien #', 'alien no',
+  'alien_registration_number', // DocketWise format
   // Spanish
   'numero a', 'número a', 'numero alien', 'número alien', 'num a',
   'numero de alien', 'número de alien', 'num. a', 'no. a',
@@ -664,6 +666,12 @@ function ClioAirtableMerger() {
   const [officeCasesSheets, setOfficeCasesSheets] = useState([]);
   const [officeCasesRecords, setOfficeCasesRecords] = useState([]);
   const [officeCasesParseReport, setOfficeCasesParseReport] = useState([]);
+
+  // DocketWise CSV state
+  const [docketWiseFile, setDocketWiseFile] = useState(null);
+  const [docketWiseSheets, setDocketWiseSheets] = useState([]);
+  const [docketWiseRecords, setDocketWiseRecords] = useState([]);
+  const [docketWiseParseReport, setDocketWiseParseReport] = useState([]);
 
   // Phase 1 state
   const [phase1Files, setPhase1Files] = useState({ bahr: null, clioContacts: null });
@@ -1156,7 +1164,185 @@ function ClioAirtableMerger() {
     reader.readAsArrayBuffer(file);
   };
 
-  // Combine and merge clients from both Excel files
+  // Handle DocketWise CSV/Excel file upload
+  const handleDocketWiseUpload = (event) => {
+    const file = event.target.files[0];
+    if (!file) return;
+
+    setDocketWiseFile(file);
+    setDocketWiseSheets([]);
+    setDocketWiseRecords([]);
+    setDocketWiseParseReport([]);
+
+    const isCSV = file.name.toLowerCase().endsWith('.csv');
+
+    if (isCSV) {
+      // Parse as CSV
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        try {
+          const text = e.target.result;
+          const parsed = parseCSV(text);
+          const reports = [];
+
+          reports.push({ type: 'info', message: `Loaded DocketWise CSV with ${parsed.rows.length} rows` });
+
+          // Convert CSV rows to client records format
+          const allClientRecords = [];
+          const sheetName = '[DocketWise] Main';
+
+          parsed.rows.forEach((row, rowIdx) => {
+            // Try to find client name and A# from DocketWise columns
+            let clientName = row['full_name'] || findColumnValue(row, CLIENT_NAME_PATTERNS);
+            let aNumber = null;
+
+            // Try to extract A# from alien_registration_number column
+            const rawANumber = row['alien_registration_number'] || findColumnValue(row, A_NUMBER_PATTERNS);
+            if (rawANumber && rawANumber !== 'Unspecified') {
+              aNumber = extractANumberFromCell(rawANumber);
+            }
+
+            // Skip if no client identifier found or name is "Unspecified"
+            if ((!clientName || clientName === 'Unspecified') && !aNumber) return;
+            if (clientName === 'Unspecified') clientName = null;
+
+            // Build data object with all non-empty fields
+            const data = {};
+            Object.entries(row).forEach(([key, value]) => {
+              if (value !== undefined && value !== null && String(value).trim() !== '' && value !== 'Unspecified') {
+                data[key] = String(value).trim();
+              }
+            });
+
+            allClientRecords.push({
+              sheetName,
+              rowIndex: rowIdx + 2, // 1-indexed + header
+              clientName: clientName || '(Unknown)',
+              normalizedName: normalizeClientName(clientName),
+              aNumber,
+              data,
+            });
+          });
+
+          const withANumber = allClientRecords.filter(c => c.aNumber).length;
+          reports.push({
+            type: 'success',
+            message: `Extracted ${allClientRecords.length} clients (${withANumber} with A#, ${allClientRecords.length - withANumber} by name only)`
+          });
+
+          setDocketWiseSheets([{
+            name: 'Main',
+            rowCount: parsed.rows.length,
+            headers: parsed.headers,
+            data: parsed.rows,
+            headerRowOffset: 0,
+          }]);
+          setDocketWiseRecords(allClientRecords);
+          setDocketWiseParseReport(reports);
+
+        } catch (err) {
+          setDocketWiseParseReport([{ type: 'error', message: `Failed to parse DocketWise CSV: ${err.message}` }]);
+        }
+      };
+      reader.readAsText(file);
+    } else {
+      // Parse as Excel
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        try {
+          const data = new Uint8Array(e.target.result);
+          const workbook = XLSX.read(data, { type: 'array' });
+
+          const reports = [];
+          const allSheets = [];
+          const allClientRecords = [];
+
+          reports.push({ type: 'info', message: `Loaded DocketWise workbook with ${workbook.SheetNames.length} sheets` });
+
+          workbook.SheetNames.forEach(sheetName => {
+            const worksheet = workbook.Sheets[sheetName];
+            const rawRows = XLSX.utils.sheet_to_json(worksheet, { header: 1, defval: '' });
+
+            if (rawRows.length === 0) {
+              reports.push({ type: 'warning', message: `Sheet "${sheetName}": empty, skipped` });
+              return;
+            }
+
+            // Find header row
+            let headerRowIdx = 0;
+            for (let i = 0; i < Math.min(rawRows.length, 15); i++) {
+              const row = rawRows[i];
+              if (!row || row.length === 0) continue;
+              const rowValues = row.map(v => String(v || '').trim());
+              // Look for DocketWise-specific headers
+              if (rowValues.some(v => v.toLowerCase() === 'full_name' || v.toLowerCase() === 'alien_registration_number') || rowLooksLikeHeaders(rowValues)) {
+                headerRowIdx = i;
+                break;
+              }
+            }
+
+            const headerValues = rawRows[headerRowIdx].map(v => String(v || '').trim());
+            const jsonData = [];
+
+            for (let i = headerRowIdx + 1; i < rawRows.length; i++) {
+              const row = rawRows[i];
+              if (!row || row.length === 0) continue;
+
+              const rowObj = {};
+              let hasData = false;
+
+              headerValues.forEach((header, idx) => {
+                if (header && row[idx] !== undefined && row[idx] !== null) {
+                  const val = String(row[idx]).trim();
+                  if (val !== '' && val !== 'Unspecified') {
+                    rowObj[header] = val;
+                    hasData = true;
+                  }
+                }
+              });
+
+              if (hasData) {
+                jsonData.push(rowObj);
+              }
+            }
+
+            if (jsonData.length === 0) {
+              reports.push({ type: 'warning', message: `Sheet "${sheetName}": no data, skipped` });
+              return;
+            }
+
+            const headers = headerValues.filter(h => h !== '');
+            allSheets.push({
+              name: sheetName,
+              rowCount: jsonData.length,
+              headers,
+              data: jsonData,
+              headerRowOffset: headerRowIdx,
+            });
+
+            // Extract clients - prefix with [DocketWise]
+            const clientsFromSheet = parseSheetForClients(jsonData, `[DocketWise] ${sheetName}`, headerRowIdx);
+            allClientRecords.push(...clientsFromSheet);
+
+            reports.push({
+              type: 'success',
+              message: `Sheet "${sheetName}": ${jsonData.length} rows, ${clientsFromSheet.length} clients found`
+            });
+          });
+
+          setDocketWiseSheets(allSheets);
+          setDocketWiseRecords(allClientRecords);
+          setDocketWiseParseReport(reports);
+
+        } catch (err) {
+          setDocketWiseParseReport([{ type: 'error', message: `Failed to parse DocketWise Excel: ${err.message}` }]);
+        }
+      };
+      reader.readAsArrayBuffer(file);
+    }
+  };
+
+  // Combine and merge clients from all data sources
   const combinedMergedClients = React.useMemo(() => {
     // Start with BAHR records - we need the raw records, not merged ones
     // So we need to rebuild from bahrSheets
@@ -1171,11 +1357,14 @@ function ClioAirtableMerger() {
     // Add Office CASES records (already have source prefix)
     allRecords.push(...officeCasesRecords);
 
+    // Add DocketWise records (already have source prefix)
+    allRecords.push(...docketWiseRecords);
+
     if (allRecords.length === 0) return [];
 
     // Merge all records together
     return mergeClientRecords(allRecords);
-  }, [bahrSheets, officeCasesRecords]);
+  }, [bahrSheets, officeCasesRecords, docketWiseRecords]);
 
   // Generate flattened output for export
   const generateBahrFlattenedOutput = () => {
@@ -1296,7 +1485,7 @@ function ClioAirtableMerger() {
     firstName: ['first name', 'firstname', 'given name', 'nombre', 'primer nombre'],
     lastName: ['last name', 'lastname', 'family name', 'surname', 'apellido', 'apellidos'],
     middleName: ['middle name', 'middlename', 'segundo nombre'],
-    dob: ['dob', 'date of birth', 'birthdate', 'birth date', 'fecha de nacimiento'],
+    dob: ['dob', 'date of birth', 'birthdate', 'birth date', 'date_of_birth', 'fecha de nacimiento'],
     phone: ['phone', 'telephone', 'telphone', 'cell', 'mobile', 'telefono', 'celular'],
     email: ['email', 'e-mail', 'correo', 'correo electronico'],
     addressLine1: ['street', 'address', 'street number and name', 'direccion', 'calle'],
@@ -2128,12 +2317,12 @@ function ClioAirtableMerger() {
             <div>
               <h2 style={{ marginBottom: '1rem', fontSize: '1.25rem' }}>Excel Data Parser</h2>
               <p style={{ color: '#71717a', marginBottom: '1.5rem', fontSize: '0.875rem' }}>
-                Upload both Excel workbooks to extract and merge client data across all tabs.
+                Upload Excel workbooks and/or DocketWise exports to extract and merge client data.
                 Clients are matched by A# (primary) or normalized name (fallback) and combined into a single flat-packed record per unique client.
               </p>
 
-              {/* Excel Uploads - Side by Side */}
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '1rem', marginBottom: '1.5rem' }}>
+              {/* Data Source Uploads */}
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '1rem', marginBottom: '1.5rem' }}>
                 {/* BAHR Workbook Upload */}
                 <div>
                   <h4 style={{ fontSize: '0.875rem', marginBottom: '0.5rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
@@ -2185,27 +2374,53 @@ function ClioAirtableMerger() {
                     )}
                   </label>
                 </div>
+
+                {/* DocketWise Upload */}
+                <div>
+                  <h4 style={{ fontSize: '0.875rem', marginBottom: '0.5rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                    DocketWise Export
+                    <span className="badge badge-success">CSV/Excel</span>
+                  </h4>
+                  <label className={`upload-zone ${docketWiseFile ? 'has-file' : ''}`}>
+                    <input
+                      type="file"
+                      accept=".csv,.xlsx,.xls"
+                      onChange={handleDocketWiseUpload}
+                      style={{ display: 'none' }}
+                    />
+                    {docketWiseFile ? (
+                      <div>
+                        <span style={{ color: '#22c55e' }}>✓</span> {docketWiseFile.name}
+                        <div style={{ fontSize: '0.75rem', color: '#71717a' }}>
+                          {docketWiseSheets.length} sheet{docketWiseSheets.length !== 1 ? 's' : ''}, {docketWiseRecords.length} clients
+                        </div>
+                      </div>
+                    ) : (
+                      <div style={{ color: '#71717a' }}>Drop CSV/Excel or click to upload</div>
+                    )}
+                  </label>
+                </div>
               </div>
 
               {/* Combined Stats */}
-              {(bahrExcelFile || officeCasesFile) && (
+              {(bahrExcelFile || officeCasesFile || docketWiseFile) && (
                 <div style={{ marginBottom: '1.5rem', padding: '1rem', background: 'rgba(34, 197, 94, 0.1)', borderRadius: '8px', border: '1px solid rgba(34, 197, 94, 0.3)' }}>
                   <h4 style={{ color: '#4ade80', marginBottom: '0.5rem' }}>Combined Results</h4>
                   <div style={{ fontSize: '0.9rem' }}>
                     <strong>{combinedMergedClients.length}</strong> unique clients merged from{' '}
-                    <strong>{bahrSheets.length + officeCasesSheets.length}</strong> total sheets
+                    <strong>{bahrSheets.length + officeCasesSheets.length + docketWiseSheets.length}</strong> total sheets
                   </div>
                   <div style={{ fontSize: '0.75rem', color: '#71717a', marginTop: '0.25rem' }}>
-                    BAHR: {bahrSheets.length} sheets | Office CASES: {officeCasesSheets.length} sheets
+                    BAHR: {bahrSheets.length} sheets | Office CASES: {officeCasesSheets.length} sheets | DocketWise: {docketWiseSheets.length} sheet{docketWiseSheets.length !== 1 ? 's' : ''}
                   </div>
                 </div>
               )}
 
               {/* Parse Reports - Tabbed */}
-              {(bahrParseReport.length > 0 || officeCasesParseReport.length > 0) && (
+              {(bahrParseReport.length > 0 || officeCasesParseReport.length > 0 || docketWiseParseReport.length > 0) && (
                 <div style={{ marginBottom: '1.5rem' }}>
                   <h4 style={{ marginBottom: '0.5rem' }}>Parse Reports</h4>
-                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '1rem' }}>
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '1rem' }}>
                     {/* BAHR Report */}
                     {bahrParseReport.length > 0 && (
                       <div>
@@ -2234,14 +2449,28 @@ function ClioAirtableMerger() {
                         </div>
                       </div>
                     )}
+                    {/* DocketWise Report */}
+                    {docketWiseParseReport.length > 0 && (
+                      <div>
+                        <div style={{ fontSize: '0.75rem', color: '#4ade80', marginBottom: '0.25rem' }}>DocketWise Export</div>
+                        <div style={{ maxHeight: '120px', overflowY: 'auto', fontSize: '0.8rem', background: 'rgba(0,0,0,0.2)', padding: '0.5rem', borderRadius: '6px' }}>
+                          {docketWiseParseReport.map((item, i) => (
+                            <div key={i} style={{ display: 'flex', gap: '0.5rem', marginBottom: '0.25rem' }}>
+                              <span className={`badge badge-${item.type}`}>{item.type}</span>
+                              <span style={{ fontSize: '0.75rem' }}>{item.message}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
                   </div>
                 </div>
               )}
 
               {/* Sheets Overview - Combined */}
-              {(bahrSheets.length > 0 || officeCasesSheets.length > 0) && (
+              {(bahrSheets.length > 0 || officeCasesSheets.length > 0 || docketWiseSheets.length > 0) && (
                 <div style={{ marginBottom: '1.5rem' }}>
-                  <h4 style={{ marginBottom: '0.5rem' }}>All Sheets ({bahrSheets.length + officeCasesSheets.length})</h4>
+                  <h4 style={{ marginBottom: '0.5rem' }}>All Sheets ({bahrSheets.length + officeCasesSheets.length + docketWiseSheets.length})</h4>
                   <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
                     {bahrSheets.map((sheet, i) => (
                       <div
@@ -2272,6 +2501,23 @@ function ClioAirtableMerger() {
                         }}
                       >
                         <div style={{ fontWeight: 600, color: '#60a5fa' }}>[Office] {sheet.name}</div>
+                        <div style={{ fontSize: '0.7rem', color: '#71717a' }}>
+                          {sheet.rowCount} rows • {sheet.headers.length} columns
+                        </div>
+                      </div>
+                    ))}
+                    {docketWiseSheets.map((sheet, i) => (
+                      <div
+                        key={`docketwise-${i}`}
+                        style={{
+                          background: 'rgba(34, 197, 94, 0.1)',
+                          border: '1px solid rgba(34, 197, 94, 0.3)',
+                          borderRadius: '6px',
+                          padding: '0.5rem 0.75rem',
+                          fontSize: '0.8rem',
+                        }}
+                      >
+                        <div style={{ fontWeight: 600, color: '#4ade80' }}>[DocketWise] {sheet.name}</div>
                         <div style={{ fontSize: '0.7rem', color: '#71717a' }}>
                           {sheet.rowCount} rows • {sheet.headers.length} columns
                         </div>
@@ -2409,24 +2655,25 @@ function ClioAirtableMerger() {
               )}
 
               {/* Instructions */}
-              {!bahrExcelFile && !officeCasesFile && (
+              {!bahrExcelFile && !officeCasesFile && !docketWiseFile && (
                 <div style={{ marginTop: '1.5rem', padding: '1rem', background: 'rgba(99, 102, 241, 0.1)', borderRadius: '8px', border: '1px solid rgba(99, 102, 241, 0.3)' }}>
                   <h4 style={{ color: '#a5b4fc', marginBottom: '0.5rem' }}>How it works</h4>
                   <ol style={{ fontSize: '0.875rem', color: '#a1a1aa', paddingLeft: '1.25rem' }}>
-                    <li>Upload one or both Excel workbooks (.xlsx)</li>
-                    <li>Parser reads all sheets from each file and extracts client data</li>
-                    <li>Clients are matched across ALL sheets by A# (priority) or name</li>
-                    <li>Data from both files is merged into a single flat-packed record per client</li>
+                    <li>Upload Excel workbooks (.xlsx) or DocketWise CSV exports</li>
+                    <li>Parser reads all sheets/rows and extracts client data</li>
+                    <li>Clients are matched across ALL sources by A# (priority) or name</li>
+                    <li>Data from all files is merged into a single flat-packed record per client</li>
                     <li>View merged data or download combined CSV/JSON</li>
                   </ol>
                   <div style={{ marginTop: '1rem', fontSize: '0.8rem', color: '#71717a' }}>
                     <strong>Recognized columns (case-insensitive):</strong><br/>
-                    Client names: {CLIENT_NAME_PATTERNS.slice(0, 6).join(', ')}...<br/>
-                    A# columns: {A_NUMBER_PATTERNS.slice(0, 6).join(', ')}...<br/>
+                    Client names: {CLIENT_NAME_PATTERNS.slice(0, 6).join(', ')}, full_name...<br/>
+                    A# columns: {A_NUMBER_PATTERNS.slice(0, 6).join(', ')}, alien_registration_number...<br/>
                     Matter fields: {MATTER_PATTERNS.slice(0, 4).join(', ')}... (extracts name from "01453-Name" format)<br/>
                     <br/>
                     <strong>Smart features:</strong><br/>
                     • Auto-detects header row (skips "Column 1", "Column 2" generic headers)<br/>
+                    • Supports DocketWise exports (full_name, alien_registration_number, date_of_birth)<br/>
                     • Supports Spanish column names (Nombre del Cliente, etc.)<br/>
                     • Merges clients with same A# or name from different files
                   </div>
