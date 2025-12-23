@@ -1413,8 +1413,14 @@ function ClioAirtableMerger() {
       });
     }
 
-    // Build output
+    // Build output - deduplicate since same record is stored under multiple keys
+    const outputtedRecords = new Set();
     bahrLookup.forEach((record) => {
+      // Skip 'AMBIGUOUS' markers and already-output records
+      if (record === 'AMBIGUOUS' || outputtedRecords.has(record._clientId)) {
+        return;
+      }
+      outputtedRecords.add(record._clientId);
       clientsOutput.push({
         'Client ID': record._clientId,
         'A#': record.aNumber,
