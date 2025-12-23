@@ -7,6 +7,7 @@
   <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 </head>
 <body>
   <div id="root"></div>
@@ -282,9 +283,211 @@ const generateCSV = (headers, rows) => {
   return [headerRow, ...dataRows].join('\n');
 };
 
+// ============================================
+// BAHR EXCEL PARSER - Extract clients from multi-tab Excel
+// ============================================
+
+// Column name variations for client identification
+const CLIENT_NAME_COLUMNS = ['Client', 'Client Name', 'Client ', 'Name'];
+const A_NUMBER_COLUMNS = ['A Number', 'A- Number', 'A#', 'A Number ', 'A-Number', 'Alien Number'];
+const MATTER_COLUMNS = ['Matter', 'Case Matter', 'Matter Number'];
+
+// Extract client name from a Matter field like "01453-Castillo Garcia"
+const extractClientFromMatter = (matter) => {
+  if (!matter) return null;
+  const match = matter.match(/^\d+-(.+)$/);
+  return match ? match[1].trim() : null;
+};
+
+// Normalize client name for matching (handles "Last First" and "First Last" and "Last, First")
+const normalizeClientName = (name) => {
+  if (!name) return null;
+  // Remove extra spaces, convert to uppercase
+  let cleaned = name.toUpperCase().trim().replace(/\s+/g, ' ');
+  // Handle "Last, First" format
+  if (cleaned.includes(',')) {
+    const parts = cleaned.split(',').map(p => p.trim());
+    cleaned = parts.join(' ');
+  }
+  // Remove accents/diacritics for matching
+  cleaned = cleaned.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  return cleaned;
+};
+
+// Extract A# from various formats
+const extractANumberFromCell = (value) => {
+  if (!value) return null;
+  const str = String(value).trim();
+  // Remove any non-digit characters except dash
+  const digits = str.replace(/[^0-9]/g, '');
+  if (digits.length === 9) {
+    return `${digits.slice(0,3)}-${digits.slice(3,6)}-${digits.slice(6,9)}`;
+  }
+  // Handle 10 digit with leading 1
+  if (digits.length === 10 && digits[0] === '1') {
+    return `${digits.slice(1,4)}-${digits.slice(4,7)}-${digits.slice(7,10)}`;
+  }
+  return null;
+};
+
+// Find a column value trying multiple possible column names
+const findColumnValue = (row, columnVariants) => {
+  for (const col of columnVariants) {
+    if (row[col] !== undefined && row[col] !== null && String(row[col]).trim() !== '') {
+      return String(row[col]).trim();
+    }
+  }
+  return null;
+};
+
+// Parse a single sheet and extract client records
+const parseSheetForClients = (sheetData, sheetName) => {
+  const clients = [];
+
+  sheetData.forEach((row, rowIdx) => {
+    // Try to find client identifier
+    let clientName = findColumnValue(row, CLIENT_NAME_COLUMNS);
+    let aNumber = null;
+
+    // Try to extract A# from dedicated columns
+    const rawANumber = findColumnValue(row, A_NUMBER_COLUMNS);
+    if (rawANumber) {
+      aNumber = extractANumberFromCell(rawANumber);
+    }
+
+    // If no client name, try to extract from Matter column
+    if (!clientName) {
+      const matter = findColumnValue(row, MATTER_COLUMNS);
+      if (matter) {
+        clientName = extractClientFromMatter(matter);
+      }
+    }
+
+    // Skip if no client identifier found
+    if (!clientName && !aNumber) return;
+
+    // Build data object with all non-empty fields from this row
+    const data = {};
+    Object.entries(row).forEach(([key, value]) => {
+      if (value !== undefined && value !== null && String(value).trim() !== '') {
+        // Skip internal fields
+        if (!key.startsWith('__')) {
+          data[key] = String(value).trim();
+        }
+      }
+    });
+
+    clients.push({
+      sheetName,
+      rowIndex: rowIdx + 2, // 1-indexed + header row
+      clientName: clientName || '(Unknown)',
+      normalizedName: normalizeClientName(clientName),
+      aNumber,
+      data,
+    });
+  });
+
+  return clients;
+};
+
+// Merge client records across sheets
+const mergeClientRecords = (allRecords) => {
+  // Group by A# first (most reliable), then by normalized name
+  const byANumber = new Map();
+  const byName = new Map();
+
+  allRecords.forEach(record => {
+    if (record.aNumber) {
+      if (!byANumber.has(record.aNumber)) {
+        byANumber.set(record.aNumber, []);
+      }
+      byANumber.get(record.aNumber).push(record);
+    } else if (record.normalizedName) {
+      if (!byName.has(record.normalizedName)) {
+        byName.set(record.normalizedName, []);
+      }
+      byName.get(record.normalizedName).push(record);
+    }
+  });
+
+  // Build merged client list
+  const mergedClients = [];
+  const processedNames = new Set();
+
+  // First, process clients with A#
+  byANumber.forEach((records, aNumber) => {
+    const names = [...new Set(records.map(r => r.clientName).filter(Boolean))];
+    const normalizedNames = [...new Set(records.map(r => r.normalizedName).filter(Boolean))];
+
+    // Mark these names as processed
+    normalizedNames.forEach(n => processedNames.add(n));
+
+    // Group data by sheet
+    const sheetData = {};
+    records.forEach(r => {
+      if (!sheetData[r.sheetName]) {
+        sheetData[r.sheetName] = [];
+      }
+      sheetData[r.sheetName].push({
+        rowIndex: r.rowIndex,
+        data: r.data,
+      });
+    });
+
+    mergedClients.push({
+      aNumber,
+      names,
+      primaryName: names[0] || '(Unknown)',
+      sheetData,
+      recordCount: records.length,
+    });
+  });
+
+  // Then, process clients without A# (by name only)
+  byName.forEach((records, normalizedName) => {
+    // Skip if already processed via A#
+    if (processedNames.has(normalizedName)) return;
+
+    const names = [...new Set(records.map(r => r.clientName).filter(Boolean))];
+
+    // Group data by sheet
+    const sheetData = {};
+    records.forEach(r => {
+      if (!sheetData[r.sheetName]) {
+        sheetData[r.sheetName] = [];
+      }
+      sheetData[r.sheetName].push({
+        rowIndex: r.rowIndex,
+        data: r.data,
+      });
+    });
+
+    mergedClients.push({
+      aNumber: null,
+      names,
+      primaryName: names[0] || '(Unknown)',
+      sheetData,
+      recordCount: records.length,
+    });
+  });
+
+  // Sort by name
+  mergedClients.sort((a, b) => a.primaryName.localeCompare(b.primaryName));
+
+  return mergedClients;
+};
+
 // Main App Component
 function ClioAirtableMerger() {
-  const [activePhase, setActivePhase] = useState(1);
+  const [activePhase, setActivePhase] = useState(0);
+
+  // Phase 0 state (Bahr Excel Parser)
+  const [bahrExcelFile, setBahrExcelFile] = useState(null);
+  const [bahrSheets, setBahrSheets] = useState([]);
+  const [bahrMergedClients, setBahrMergedClients] = useState([]);
+  const [bahrParseReport, setBahrParseReport] = useState([]);
+  const [bahrSelectedClient, setBahrSelectedClient] = useState(null);
+  const [bahrSearchTerm, setBahrSearchTerm] = useState('');
 
   // Phase 1 state
   const [phase1Files, setPhase1Files] = useState({ bahr: null, clioContacts: null });
@@ -519,6 +722,167 @@ function ClioAirtableMerger() {
       }
     };
     reader.readAsText(file);
+  };
+
+  // Handle Bahr Excel file upload
+  const handleBahrExcelUpload = (event) => {
+    const file = event.target.files[0];
+    if (!file) return;
+
+    setBahrExcelFile(file);
+    setBahrSheets([]);
+    setBahrMergedClients([]);
+    setBahrParseReport([]);
+    setBahrSelectedClient(null);
+
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        const data = new Uint8Array(e.target.result);
+        const workbook = XLSX.read(data, { type: 'array' });
+
+        const reports = [];
+        const allSheets = [];
+        const allClientRecords = [];
+
+        reports.push({ type: 'info', message: `Loaded workbook with ${workbook.SheetNames.length} sheets` });
+
+        // Process each sheet
+        workbook.SheetNames.forEach(sheetName => {
+          const worksheet = workbook.Sheets[sheetName];
+          const jsonData = XLSX.utils.sheet_to_json(worksheet, { defval: '' });
+
+          if (jsonData.length === 0) {
+            reports.push({ type: 'warning', message: `Sheet "${sheetName}": empty, skipped` });
+            return;
+          }
+
+          // Get column headers
+          const headers = Object.keys(jsonData[0] || {});
+
+          allSheets.push({
+            name: sheetName,
+            rowCount: jsonData.length,
+            headers,
+            data: jsonData,
+          });
+
+          // Extract clients from this sheet
+          const clientsFromSheet = parseSheetForClients(jsonData, sheetName);
+          allClientRecords.push(...clientsFromSheet);
+
+          reports.push({
+            type: 'success',
+            message: `Sheet "${sheetName}": ${jsonData.length} rows, ${clientsFromSheet.length} clients found`
+          });
+        });
+
+        // Merge clients across sheets
+        const merged = mergeClientRecords(allClientRecords);
+
+        const withANumber = merged.filter(c => c.aNumber).length;
+        const withoutANumber = merged.filter(c => !c.aNumber).length;
+
+        reports.push({
+          type: 'info',
+          message: `Merged into ${merged.length} unique clients (${withANumber} with A#, ${withoutANumber} by name only)`
+        });
+
+        setBahrSheets(allSheets);
+        setBahrMergedClients(merged);
+        setBahrParseReport(reports);
+
+      } catch (err) {
+        setBahrParseReport([{ type: 'error', message: `Failed to parse Excel: ${err.message}` }]);
+      }
+    };
+    reader.readAsArrayBuffer(file);
+  };
+
+  // Generate flattened output for export
+  const generateBahrFlattenedOutput = () => {
+    const output = [];
+
+    bahrMergedClients.forEach(client => {
+      // Add client header row
+      output.push({
+        type: 'client',
+        clientName: client.primaryName,
+        aNumber: client.aNumber || '',
+        sheetCount: Object.keys(client.sheetData).length,
+        recordCount: client.recordCount,
+        allNames: client.names.join('; '),
+      });
+
+      // Add data rows for each sheet
+      Object.entries(client.sheetData).forEach(([sheetName, records]) => {
+        records.forEach(record => {
+          Object.entries(record.data).forEach(([key, value]) => {
+            // Skip client identifier fields (already in header)
+            if (CLIENT_NAME_COLUMNS.includes(key) || A_NUMBER_COLUMNS.includes(key) || MATTER_COLUMNS.includes(key)) {
+              return;
+            }
+            output.push({
+              type: 'data',
+              clientName: client.primaryName,
+              aNumber: client.aNumber || '',
+              sheetName,
+              rowIndex: record.rowIndex,
+              fieldName: key,
+              fieldValue: value,
+            });
+          });
+        });
+      });
+    });
+
+    return output;
+  };
+
+  // Download flattened data as CSV
+  const downloadBahrFlattenedCSV = () => {
+    const flatData = generateBahrFlattenedOutput();
+    const headers = ['Client Name', 'A#', 'Sheet', 'Row', 'Field', 'Value'];
+    const rows = flatData
+      .filter(row => row.type === 'data')
+      .map(row => ({
+        'Client Name': row.clientName,
+        'A#': row.aNumber,
+        'Sheet': row.sheetName,
+        'Row': row.rowIndex,
+        'Field': row.fieldName,
+        'Value': row.fieldValue,
+      }));
+
+    const csv = generateCSV(headers, rows);
+    const blob = new Blob([csv], { type: 'text/csv' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'bahr_flattened_data.csv';
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  // Download client summary as CSV
+  const downloadBahrClientSummary = () => {
+    const headers = ['Client Name', 'A#', 'Sheets Found In', 'Record Count', 'All Name Variants'];
+    const rows = bahrMergedClients.map(client => ({
+      'Client Name': client.primaryName,
+      'A#': client.aNumber || '',
+      'Sheets Found In': Object.keys(client.sheetData).join('; '),
+      'Record Count': client.recordCount,
+      'All Name Variants': client.names.join('; '),
+    }));
+
+    const csv = generateCSV(headers, rows);
+    const blob = new Blob([csv], { type: 'text/csv' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'bahr_client_summary.csv';
+    a.click();
+    URL.revokeObjectURL(url);
   };
 
   // Phase 1: Client Import
@@ -1064,6 +1428,7 @@ function ClioAirtableMerger() {
         {/* Phase Tabs */}
         <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '0', flexWrap: 'wrap' }}>
           {[
+            { num: 0, label: 'Bahr Parser', desc: 'Excel Multi-Tab Flattener' },
             { num: 1, label: 'Phase 1: Clients', desc: 'Bahr + Clio Contacts' },
             { num: 2, label: 'Phase 2: Case Master', desc: 'Matters + Notes' },
             { num: 3, label: 'Phase 3: Events & Relationships', desc: 'Events + Related Contacts' },
@@ -1082,6 +1447,230 @@ function ClioAirtableMerger() {
 
         {/* Phase Content */}
         <div className="card" style={{ borderTopLeftRadius: 0 }}>
+          {/* Phase 0: Bahr Excel Parser */}
+          {activePhase === 0 && (
+            <div>
+              <h2 style={{ marginBottom: '1rem', fontSize: '1.25rem' }}>Bahr Excel Parser</h2>
+              <p style={{ color: '#71717a', marginBottom: '1.5rem', fontSize: '0.875rem' }}>
+                Upload the Bahr Excel workbook to extract and merge client data across all tabs.
+                Clients are matched by A# (primary) or normalized name (fallback).
+              </p>
+
+              {/* Excel Upload */}
+              <div style={{ marginBottom: '1.5rem' }}>
+                <h4 style={{ fontSize: '0.875rem', marginBottom: '0.5rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                  Bahr Workbook
+                  <span className="badge badge-warning">Excel .xlsx</span>
+                </h4>
+                <label className={`upload-zone ${bahrExcelFile ? 'has-file' : ''}`}>
+                  <input
+                    type="file"
+                    accept=".xlsx,.xls"
+                    onChange={handleBahrExcelUpload}
+                    style={{ display: 'none' }}
+                  />
+                  {bahrExcelFile ? (
+                    <div>
+                      <span style={{ color: '#22c55e' }}>✓</span> {bahrExcelFile.name}
+                      <div style={{ fontSize: '0.75rem', color: '#71717a' }}>
+                        {bahrSheets.length} sheets, {bahrMergedClients.length} unique clients
+                      </div>
+                    </div>
+                  ) : (
+                    <div style={{ color: '#71717a' }}>Drop Excel file or click to upload</div>
+                  )}
+                </label>
+              </div>
+
+              {/* Parse Report */}
+              {bahrParseReport.length > 0 && (
+                <div style={{ marginBottom: '1.5rem' }}>
+                  <h4 style={{ marginBottom: '0.5rem' }}>Parse Report</h4>
+                  <div style={{ maxHeight: '150px', overflowY: 'auto', fontSize: '0.8rem' }}>
+                    {bahrParseReport.map((item, i) => (
+                      <div key={i} style={{ display: 'flex', gap: '0.5rem', marginBottom: '0.25rem' }}>
+                        <span className={`badge badge-${item.type}`}>{item.type}</span>
+                        <span>{item.message}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Sheets Overview */}
+              {bahrSheets.length > 0 && (
+                <div style={{ marginBottom: '1.5rem' }}>
+                  <h4 style={{ marginBottom: '0.5rem' }}>Sheets Found ({bahrSheets.length})</h4>
+                  <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+                    {bahrSheets.map((sheet, i) => (
+                      <div
+                        key={i}
+                        style={{
+                          background: 'rgba(99, 102, 241, 0.1)',
+                          border: '1px solid rgba(99, 102, 241, 0.3)',
+                          borderRadius: '6px',
+                          padding: '0.5rem 0.75rem',
+                          fontSize: '0.8rem',
+                        }}
+                      >
+                        <div style={{ fontWeight: 600, color: '#a5b4fc' }}>{sheet.name}</div>
+                        <div style={{ fontSize: '0.7rem', color: '#71717a' }}>
+                          {sheet.rowCount} rows • {sheet.headers.length} columns
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Download Buttons */}
+              {bahrMergedClients.length > 0 && (
+                <div style={{ display: 'flex', gap: '1rem', marginBottom: '1.5rem' }}>
+                  <button className="btn btn-primary" onClick={downloadBahrClientSummary}>
+                    Download Client Summary ({bahrMergedClients.length} clients)
+                  </button>
+                  <button className="btn btn-secondary" onClick={downloadBahrFlattenedCSV}>
+                    Download Flattened Data (all fields)
+                  </button>
+                </div>
+              )}
+
+              {/* Client Search and List */}
+              {bahrMergedClients.length > 0 && (
+                <div>
+                  <div style={{ display: 'flex', gap: '1rem', alignItems: 'center', marginBottom: '1rem' }}>
+                    <h4 style={{ margin: 0 }}>Merged Clients ({bahrMergedClients.length})</h4>
+                    <input
+                      type="text"
+                      placeholder="Search by name or A#..."
+                      value={bahrSearchTerm}
+                      onChange={(e) => setBahrSearchTerm(e.target.value)}
+                      style={{
+                        flex: 1,
+                        maxWidth: '300px',
+                        padding: '0.5rem 0.75rem',
+                        borderRadius: '6px',
+                        border: '1px solid rgba(255, 255, 255, 0.2)',
+                        background: 'rgba(0, 0, 0, 0.3)',
+                        color: '#e4e4e7',
+                        fontSize: '0.875rem',
+                      }}
+                    />
+                  </div>
+
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 2fr', gap: '1rem', maxHeight: '500px' }}>
+                    {/* Client List */}
+                    <div style={{ overflowY: 'auto', maxHeight: '500px', background: 'rgba(0, 0, 0, 0.2)', borderRadius: '8px', padding: '0.5rem' }}>
+                      {bahrMergedClients
+                        .filter(client => {
+                          if (!bahrSearchTerm) return true;
+                          const search = bahrSearchTerm.toUpperCase();
+                          return (
+                            client.primaryName.toUpperCase().includes(search) ||
+                            (client.aNumber && client.aNumber.includes(search)) ||
+                            client.names.some(n => n.toUpperCase().includes(search))
+                          );
+                        })
+                        .slice(0, 100)
+                        .map((client, i) => (
+                          <div
+                            key={i}
+                            onClick={() => setBahrSelectedClient(client)}
+                            style={{
+                              padding: '0.5rem 0.75rem',
+                              borderRadius: '4px',
+                              cursor: 'pointer',
+                              marginBottom: '0.25rem',
+                              background: bahrSelectedClient === client ? 'rgba(99, 102, 241, 0.3)' : 'transparent',
+                              borderLeft: client.aNumber ? '3px solid #22c55e' : '3px solid #f59e0b',
+                            }}
+                          >
+                            <div style={{ fontWeight: 500, fontSize: '0.85rem' }}>{client.primaryName}</div>
+                            <div style={{ fontSize: '0.7rem', color: '#71717a' }}>
+                              {client.aNumber || 'No A#'} • {Object.keys(client.sheetData).length} sheets
+                            </div>
+                          </div>
+                        ))}
+                    </div>
+
+                    {/* Client Detail */}
+                    <div style={{ overflowY: 'auto', maxHeight: '500px', background: 'rgba(0, 0, 0, 0.2)', borderRadius: '8px', padding: '1rem' }}>
+                      {bahrSelectedClient ? (
+                        <div>
+                          <div style={{ marginBottom: '1rem', paddingBottom: '1rem', borderBottom: '1px solid rgba(255,255,255,0.1)' }}>
+                            <h3 style={{ margin: 0, color: '#a5b4fc' }}>{bahrSelectedClient.primaryName}</h3>
+                            <div style={{ fontSize: '0.9rem', color: bahrSelectedClient.aNumber ? '#4ade80' : '#fbbf24', marginTop: '0.25rem' }}>
+                              A#: {bahrSelectedClient.aNumber || '(not found)'}
+                            </div>
+                            {bahrSelectedClient.names.length > 1 && (
+                              <div style={{ fontSize: '0.75rem', color: '#71717a', marginTop: '0.25rem' }}>
+                                Also known as: {bahrSelectedClient.names.slice(1).join(', ')}
+                              </div>
+                            )}
+                          </div>
+
+                          {/* Data by Sheet */}
+                          {Object.entries(bahrSelectedClient.sheetData).map(([sheetName, records]) => (
+                            <div key={sheetName} style={{ marginBottom: '1rem' }}>
+                              <h4 style={{ color: '#6366f1', fontSize: '0.9rem', marginBottom: '0.5rem' }}>
+                                📄 {sheetName}
+                              </h4>
+                              {records.map((record, ri) => (
+                                <div
+                                  key={ri}
+                                  style={{
+                                    background: 'rgba(0,0,0,0.3)',
+                                    borderRadius: '6px',
+                                    padding: '0.75rem',
+                                    marginBottom: '0.5rem',
+                                    fontSize: '0.8rem',
+                                  }}
+                                >
+                                  <div style={{ fontSize: '0.7rem', color: '#71717a', marginBottom: '0.5rem' }}>
+                                    Row {record.rowIndex}
+                                  </div>
+                                  {Object.entries(record.data).map(([key, value]) => (
+                                    <div key={key} style={{ display: 'flex', gap: '0.5rem', marginBottom: '0.25rem' }}>
+                                      <span style={{ color: '#a5b4fc', minWidth: '120px', flexShrink: 0 }}>{key}:</span>
+                                      <span style={{ color: '#e4e4e7', wordBreak: 'break-word' }}>{value}</span>
+                                    </div>
+                                  ))}
+                                </div>
+                              ))}
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
+                        <div style={{ color: '#71717a', textAlign: 'center', padding: '2rem' }}>
+                          Select a client to view their data across all sheets
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Instructions */}
+              {!bahrExcelFile && (
+                <div style={{ marginTop: '1.5rem', padding: '1rem', background: 'rgba(99, 102, 241, 0.1)', borderRadius: '8px', border: '1px solid rgba(99, 102, 241, 0.3)' }}>
+                  <h4 style={{ color: '#a5b4fc', marginBottom: '0.5rem' }}>How it works</h4>
+                  <ol style={{ fontSize: '0.875rem', color: '#a1a1aa', paddingLeft: '1.25rem' }}>
+                    <li>Upload the Bahr Excel workbook (.xlsx)</li>
+                    <li>Parser reads all sheets and extracts client data</li>
+                    <li>Clients are matched across sheets by A# (priority) or name</li>
+                    <li>View merged data or download flattened CSV</li>
+                  </ol>
+                  <div style={{ marginTop: '1rem', fontSize: '0.8rem', color: '#71717a' }}>
+                    <strong>Recognized columns:</strong><br/>
+                    Client names: {CLIENT_NAME_COLUMNS.join(', ')}<br/>
+                    A# columns: {A_NUMBER_COLUMNS.join(', ')}<br/>
+                    Matter fields: {MATTER_COLUMNS.join(', ')} (extracts name from "01453-Name" format)
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
           {/* Phase 1: Clients */}
           {activePhase === 1 && (
             <div>
