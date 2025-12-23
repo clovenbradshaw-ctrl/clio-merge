@@ -1,0 +1,795 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Clio Contact Splitter for Airtable</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      max-width: 1400px;
+      margin: 0 auto;
+      padding: 20px;
+      background: #f5f5f5;
+    }
+    h1 { color: #333; margin-bottom: 10px; }
+    .subtitle { color: #666; margin-bottom: 20px; }
+
+    .upload-section {
+      background: white;
+      padding: 20px;
+      border-radius: 8px;
+      margin-bottom: 20px;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    }
+
+    .drop-zone {
+      border: 2px dashed #ccc;
+      border-radius: 8px;
+      padding: 40px;
+      text-align: center;
+      cursor: pointer;
+      transition: all 0.3s;
+    }
+    .drop-zone:hover, .drop-zone.dragover {
+      border-color: #4CAF50;
+      background: #f0fff0;
+    }
+    .drop-zone input { display: none; }
+
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      gap: 15px;
+      margin: 20px 0;
+    }
+    .stat-card {
+      background: white;
+      padding: 15px;
+      border-radius: 8px;
+      text-align: center;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    }
+    .stat-card .number { font-size: 2em; font-weight: bold; color: #4CAF50; }
+    .stat-card .label { color: #666; font-size: 0.9em; }
+
+    .mapping-section {
+      background: white;
+      padding: 20px;
+      border-radius: 8px;
+      margin-bottom: 20px;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    }
+
+    .mapping-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.9em;
+    }
+    .mapping-table th, .mapping-table td {
+      padding: 10px;
+      text-align: left;
+      border-bottom: 1px solid #eee;
+    }
+    .mapping-table th { background: #f9f9f9; font-weight: 600; }
+    .mapping-table tr:hover { background: #f5f5f5; }
+
+    .field-tag {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 4px;
+      font-size: 0.85em;
+      margin: 2px;
+    }
+    .field-tag.clio { background: #e3f2fd; color: #1565c0; }
+    .field-tag.airtable { background: #e8f5e9; color: #2e7d32; }
+    .field-tag.transform { background: #fff3e0; color: #e65100; }
+
+    .preview-section {
+      background: white;
+      padding: 20px;
+      border-radius: 8px;
+      margin-bottom: 20px;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    }
+
+    .preview-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.85em;
+      overflow-x: auto;
+      display: block;
+    }
+    .preview-table th, .preview-table td {
+      padding: 8px;
+      text-align: left;
+      border: 1px solid #ddd;
+      white-space: nowrap;
+      max-width: 200px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .preview-table th { background: #4CAF50; color: white; position: sticky; top: 0; }
+    .preview-table tr:nth-child(even) { background: #f9f9f9; }
+
+    .download-section {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    button {
+      padding: 12px 24px;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 1em;
+      transition: all 0.3s;
+    }
+    button.primary {
+      background: #4CAF50;
+      color: white;
+    }
+    button.primary:hover { background: #45a049; }
+    button.secondary {
+      background: #2196F3;
+      color: white;
+    }
+    button.secondary:hover { background: #1976D2; }
+    button:disabled {
+      background: #ccc;
+      cursor: not-allowed;
+    }
+
+    .issues {
+      background: #fff3e0;
+      border: 1px solid #ffcc80;
+      border-radius: 8px;
+      padding: 15px;
+      margin: 20px 0;
+    }
+    .issues h3 { color: #e65100; margin-top: 0; }
+    .issue-item { padding: 5px 0; border-bottom: 1px solid #ffe0b2; }
+    .issue-item:last-child { border-bottom: none; }
+
+    .tabs {
+      display: flex;
+      gap: 5px;
+      margin-bottom: 15px;
+    }
+    .tab {
+      padding: 10px 20px;
+      background: #eee;
+      border: none;
+      border-radius: 6px 6px 0 0;
+      cursor: pointer;
+    }
+    .tab.active { background: #4CAF50; color: white; }
+  </style>
+</head>
+<body>
+  <h1>Clio Contact Splitter for Airtable</h1>
+  <p class="subtitle">Upload Clio contacts export to split and transform for Airtable Client Info import</p>
+
+  <div id="app"></div>
+
+  <script>
+// ============================================
+// FIELD MAPPING CONFIGURATION
+// ============================================
+
+const CLIO_TO_AIRTABLE_MAPPING = {
+  // Core Identity
+  'UniqueId': { airtable: 'clio_contact_id', transform: null },
+  'First Name': { airtable: 'First Name', transform: null },
+  'Middle Name': { airtable: 'Middle Name', transform: null },
+  'Last Name': { airtable: 'Family Name', transform: null },
+
+  // Contact Info - Phone (priority: Mobile > Primary > Business > Home)
+  'Mobile Phone': { airtable: 'Phone Number', transform: 'normalizePhone', priority: 1 },
+  'Primary Phone': { airtable: 'Phone Number', transform: 'normalizePhone', priority: 2 },
+  'Business Phone': { airtable: 'Phone Number', transform: 'normalizePhone', priority: 3 },
+  'Home Phone': { airtable: 'Phone Number', transform: 'normalizePhone', priority: 4 },
+
+  // Contact Info - Email
+  'E-mail Address': { airtable: 'Client Email', transform: 'normalizeEmail', priority: 1 },
+  'E-mail 2 Address': { airtable: 'Client Email', transform: 'normalizeEmail', priority: 2 },
+
+  // Address - Home preferred over Business
+  'Home Street': { airtable: 'Address Line 1', transform: null, priority: 1 },
+  'Business Street': { airtable: 'Address Line 1', transform: null, priority: 2 },
+  'Home Street 2': { airtable: 'Address Line 2', transform: null, priority: 1 },
+  'Business Street 2': { airtable: 'Address Line 2', transform: null, priority: 2 },
+  'Home City': { airtable: 'City', transform: null, priority: 1 },
+  'Business City': { airtable: 'City', transform: null, priority: 2 },
+  'Home State': { airtable: 'State', transform: 'normalizeState', priority: 1 },
+  'Business State': { airtable: 'State', transform: 'normalizeState', priority: 2 },
+  'Home Postal Code': { airtable: 'Zip (5)', transform: 'normalizeZip', priority: 1 },
+  'Business Postal Code': { airtable: 'Zip (5)', transform: 'normalizeZip', priority: 2 },
+  'Home Country/Region': { airtable: 'Country', transform: 'normalizeCountry', priority: 1 },
+  'Business Country/Region': { airtable: 'Country', transform: 'normalizeCountry', priority: 2 },
+
+  // Dates
+  'Birthday': { airtable: 'DOB', transform: 'normalizeDate' },
+
+  // Notes
+  'Notes': { airtable: 'Contact Notes', transform: null },
+
+  // Timestamps
+  'CreatedAt': { airtable: 'Created At', transform: null },
+
+  // Custom Fields
+  'Custom Field - Contact Type': { airtable: '_contact_type', transform: null },
+};
+
+// Airtable output fields in order
+const AIRTABLE_OUTPUT_FIELDS = [
+  'clio_contact_id',
+  'First Name',
+  'Middle Name',
+  'Family Name',
+  'A#',
+  'Phone Number',
+  'Client Email',
+  'Address Line 1',
+  'Address Line 2',
+  'City',
+  'State',
+  'Zip (5)',
+  'Country',
+  'DOB',
+  'Entry Date',
+  'Place of Entry',
+  'Contact Notes',
+  'Created At',
+  'Bahr Client',
+  '_contact_type',
+  '_original_tags',
+];
+
+// ============================================
+// TRANSFORMATION FUNCTIONS
+// ============================================
+
+const transformers = {
+  normalizePhone: (value) => {
+    if (!value) return '';
+    // Remove all non-digit characters
+    const digits = value.replace(/\D/g, '');
+    // Handle US numbers
+    if (digits.length === 10) {
+      return digits; // Return as 10 digits for Airtable
+    }
+    if (digits.length === 11 && digits.startsWith('1')) {
+      return digits.slice(1); // Remove leading 1
+    }
+    return digits || value; // Return what we have
+  },
+
+  normalizeEmail: (value) => {
+    if (!value) return '';
+    return value.trim().toLowerCase();
+  },
+
+  normalizeDate: (value) => {
+    if (!value) return '';
+    // Try to parse various date formats
+    const date = new Date(value);
+    if (!isNaN(date.getTime())) {
+      return date.toISOString().split('T')[0]; // YYYY-MM-DD
+    }
+    // Try MM/DD/YYYY format
+    const parts = value.split('/');
+    if (parts.length === 3) {
+      const [m, d, y] = parts;
+      const year = y.length === 2 ? (parseInt(y) > 50 ? '19' + y : '20' + y) : y;
+      return `${year}-${m.padStart(2, '0')}-${d.padStart(2, '0')}`;
+    }
+    return value;
+  },
+
+  normalizeZip: (value) => {
+    if (!value) return '';
+    // Extract first 5 digits
+    const match = value.match(/\d{5}/);
+    return match ? match[0] : value.replace(/\D/g, '').slice(0, 5);
+  },
+
+  normalizeState: (value) => {
+    if (!value) return '';
+    // Return as-is, but trimmed - Airtable will need record linking
+    return value.trim().toUpperCase();
+  },
+
+  normalizeCountry: (value) => {
+    if (!value) return '';
+    const v = value.trim().toLowerCase();
+    // Common country normalizations for immigration context
+    const countryMap = {
+      'usa': 'United States',
+      'us': 'United States',
+      'united states': 'United States',
+      'united states of america': 'United States',
+      'mexico': 'Mexico',
+      'mx': 'Mexico',
+      'guatemala': 'Guatemala',
+      'gt': 'Guatemala',
+      'honduras': 'Honduras',
+      'hn': 'Honduras',
+      'el salvador': 'El Salvador',
+      'sv': 'El Salvador',
+      'salvador': 'El Salvador',
+      'nicaragua': 'Nicaragua',
+      'ni': 'Nicaragua',
+      'venezuela': 'Venezuela',
+      've': 'Venezuela',
+      'colombia': 'Colombia',
+      'co': 'Colombia',
+      'ecuador': 'Ecuador',
+      'ec': 'Ecuador',
+      'peru': 'Peru',
+      'pe': 'Peru',
+      'brazil': 'Brazil',
+      'br': 'Brazil',
+      'cuba': 'Cuba',
+      'cu': 'Cuba',
+      'haiti': 'Haiti',
+      'ht': 'Haiti',
+      'dominican republic': 'Dominican Republic',
+      'do': 'Dominican Republic',
+    };
+    return countryMap[v] || value.trim();
+  },
+
+  normalizeANumber: (value) => {
+    if (!value) return '';
+    // Extract digits
+    const digits = value.replace(/\D/g, '');
+    // A-numbers are typically 8-9 digits
+    if (digits.length >= 8 && digits.length <= 10) {
+      // Format as ###-###-###
+      const padded = digits.padStart(9, '0').slice(-9);
+      return `${padded.slice(0,3)}-${padded.slice(3,6)}-${padded.slice(6,9)}`;
+    }
+    return value;
+  }
+};
+
+// ============================================
+// CSV/TSV PARSER
+// ============================================
+
+function parseDelimitedText(text) {
+  if (!text || !text.trim()) return { headers: [], rows: [] };
+
+  // Detect delimiter (tab vs comma)
+  const firstLine = text.split('\n')[0];
+  const delimiter = firstLine.includes('\t') ? '\t' : ',';
+
+  const rows = [];
+  let currentRow = [];
+  let currentField = '';
+  let inQuotes = false;
+
+  for (let i = 0; i < text.length; i++) {
+    const char = text[i];
+    const nextChar = text[i + 1];
+
+    if (inQuotes) {
+      if (char === '"' && nextChar === '"') {
+        currentField += '"';
+        i++;
+      } else if (char === '"') {
+        inQuotes = false;
+      } else {
+        currentField += char;
+      }
+    } else {
+      if (char === '"') {
+        inQuotes = true;
+      } else if (char === delimiter) {
+        currentRow.push(currentField.trim());
+        currentField = '';
+      } else if (char === '\n' || (char === '\r' && nextChar === '\n')) {
+        currentRow.push(currentField.trim());
+        currentField = '';
+        if (currentRow.some(f => f !== '')) {
+          rows.push([...currentRow]);
+        }
+        currentRow = [];
+        if (char === '\r' && nextChar === '\n') i++;
+      } else if (char === '\r') {
+        currentRow.push(currentField.trim());
+        currentField = '';
+        if (currentRow.some(f => f !== '')) {
+          rows.push([...currentRow]);
+        }
+        currentRow = [];
+      } else {
+        currentField += char;
+      }
+    }
+  }
+
+  // Handle last field/row
+  if (currentField || currentRow.length > 0) {
+    currentRow.push(currentField.trim());
+    if (currentRow.some(f => f !== '')) {
+      rows.push(currentRow);
+    }
+  }
+
+  if (rows.length === 0) return { headers: [], rows: [] };
+
+  const headers = rows[0];
+  const dataRows = rows.slice(1);
+
+  return { headers, rows: dataRows, delimiter };
+}
+
+// ============================================
+// DATA TRANSFORMATION
+// ============================================
+
+function transformClioToAirtable(headers, rows) {
+  const results = [];
+  const issues = [];
+
+  // Build header index
+  const headerIndex = {};
+  headers.forEach((h, i) => headerIndex[h] = i);
+
+  // Collect tags columns
+  const tagColumns = headers.filter(h => h.startsWith('Tag '));
+
+  rows.forEach((row, rowIdx) => {
+    const record = {};
+    const rowIssues = [];
+
+    // Initialize all output fields
+    AIRTABLE_OUTPUT_FIELDS.forEach(f => record[f] = '');
+
+    // Track which fields have been set (for priority handling)
+    const fieldSet = {};
+
+    // Process each Clio field
+    headers.forEach((clioField, colIdx) => {
+      const value = row[colIdx] || '';
+      if (!value) return;
+
+      const mapping = CLIO_TO_AIRTABLE_MAPPING[clioField];
+      if (!mapping) return;
+
+      const { airtable, transform, priority } = mapping;
+
+      // Check priority - only set if not already set by higher priority
+      if (priority && fieldSet[airtable] && fieldSet[airtable] <= priority) {
+        return;
+      }
+
+      // Apply transformation if specified
+      let transformed = value;
+      if (transform && transformers[transform]) {
+        transformed = transformers[transform](value);
+      }
+
+      if (transformed) {
+        record[airtable] = transformed;
+        fieldSet[airtable] = priority || 999;
+      }
+    });
+
+    // Extract A# from tags
+    const tags = [];
+    tagColumns.forEach(tagCol => {
+      const tagValue = row[headerIndex[tagCol]] || '';
+      if (tagValue) {
+        tags.push(tagValue);
+        // Check if tag contains an A#
+        if (/A[#-]?\s*\d{8,9}/i.test(tagValue) || /^\d{3}-\d{3}-\d{3}$/.test(tagValue)) {
+          const normalized = transformers.normalizeANumber(tagValue);
+          if (normalized && !record['A#']) {
+            record['A#'] = normalized;
+          }
+        }
+      }
+    });
+    record['_original_tags'] = tags.join('; ');
+
+    // Set Bahr Client flag
+    record['Bahr Client'] = 'TRUE';
+
+    // Validate required fields
+    if (!record['First Name'] && !record['Family Name']) {
+      rowIssues.push(`Row ${rowIdx + 2}: Missing both First Name and Family Name`);
+    }
+
+    // Check for valid email
+    if (record['Client Email'] && !record['Client Email'].includes('@')) {
+      rowIssues.push(`Row ${rowIdx + 2}: Invalid email format: ${record['Client Email']}`);
+    }
+
+    // Check phone number
+    if (record['Phone Number']) {
+      const phoneDigits = record['Phone Number'].replace(/\D/g, '');
+      if (phoneDigits.length < 10) {
+        rowIssues.push(`Row ${rowIdx + 2}: Phone number may be incomplete: ${record['Phone Number']}`);
+      }
+    }
+
+    results.push(record);
+    if (rowIssues.length > 0) {
+      issues.push(...rowIssues);
+    }
+  });
+
+  return { results, issues };
+}
+
+// ============================================
+// EXPORT FUNCTIONS
+// ============================================
+
+function exportToCSV(records, fields) {
+  const escapeCSV = (val) => {
+    if (val === null || val === undefined) return '';
+    const str = String(val);
+    if (str.includes(',') || str.includes('"') || str.includes('\n')) {
+      return '"' + str.replace(/"/g, '""') + '"';
+    }
+    return str;
+  };
+
+  const header = fields.map(escapeCSV).join(',');
+  const rows = records.map(r => fields.map(f => escapeCSV(r[f] || '')).join(','));
+
+  return header + '\n' + rows.join('\n');
+}
+
+function exportToJSON(records) {
+  // Filter out internal fields starting with _
+  const cleanRecords = records.map(r => {
+    const clean = {};
+    Object.keys(r).forEach(k => {
+      if (!k.startsWith('_') && r[k]) {
+        clean[k] = r[k];
+      }
+    });
+    return clean;
+  });
+  return JSON.stringify(cleanRecords, null, 2);
+}
+
+function downloadFile(content, filename, mimeType) {
+  const blob = new Blob([content], { type: mimeType });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+// ============================================
+// UI RENDERING
+// ============================================
+
+const app = document.getElementById('app');
+
+let state = {
+  clioData: null,
+  transformedData: null,
+  issues: [],
+  activeTab: 'preview',
+  fileName: ''
+};
+
+function render() {
+  app.innerHTML = `
+    <div class="upload-section">
+      <div class="drop-zone" id="dropZone">
+        <p><strong>Drop Clio Contacts CSV/TSV here</strong></p>
+        <p style="color:#666">or click to select file</p>
+        <input type="file" id="fileInput" accept=".csv,.tsv,.txt">
+        ${state.fileName ? `<p style="color:#4CAF50; margin-top:10px">Loaded: ${state.fileName}</p>` : ''}
+      </div>
+    </div>
+
+    ${state.transformedData ? renderResults() : renderMappingInfo()}
+  `;
+
+  setupEventListeners();
+}
+
+function renderMappingInfo() {
+  const mappingRows = Object.entries(CLIO_TO_AIRTABLE_MAPPING)
+    .map(([clio, config]) => `
+      <tr>
+        <td><span class="field-tag clio">${clio}</span></td>
+        <td><span class="field-tag airtable">${config.airtable}</span></td>
+        <td>${config.transform ? `<span class="field-tag transform">${config.transform}</span>` : '-'}</td>
+        <td>${config.priority || '-'}</td>
+      </tr>
+    `).join('');
+
+  return `
+    <div class="mapping-section">
+      <h2>Field Mapping Reference</h2>
+      <p>The following Clio fields will be mapped to Airtable Client Info:</p>
+      <table class="mapping-table">
+        <thead>
+          <tr>
+            <th>Clio Field</th>
+            <th>Airtable Field</th>
+            <th>Transform</th>
+            <th>Priority</th>
+          </tr>
+        </thead>
+        <tbody>${mappingRows}</tbody>
+      </table>
+    </div>
+  `;
+}
+
+function renderResults() {
+  const { results, issues } = state.transformedData;
+
+  const statsWithData = {
+    total: results.length,
+    withPhone: results.filter(r => r['Phone Number']).length,
+    withEmail: results.filter(r => r['Client Email']).length,
+    withAddress: results.filter(r => r['Address Line 1']).length,
+    withANumber: results.filter(r => r['A#']).length,
+  };
+
+  return `
+    <div class="stats">
+      <div class="stat-card">
+        <div class="number">${statsWithData.total}</div>
+        <div class="label">Total Records</div>
+      </div>
+      <div class="stat-card">
+        <div class="number">${statsWithData.withPhone}</div>
+        <div class="label">With Phone</div>
+      </div>
+      <div class="stat-card">
+        <div class="number">${statsWithData.withEmail}</div>
+        <div class="label">With Email</div>
+      </div>
+      <div class="stat-card">
+        <div class="number">${statsWithData.withAddress}</div>
+        <div class="label">With Address</div>
+      </div>
+      <div class="stat-card">
+        <div class="number">${statsWithData.withANumber}</div>
+        <div class="label">With A#</div>
+      </div>
+    </div>
+
+    ${issues.length > 0 ? `
+      <div class="issues">
+        <h3>Data Issues (${issues.length})</h3>
+        ${issues.slice(0, 20).map(i => `<div class="issue-item">${i}</div>`).join('')}
+        ${issues.length > 20 ? `<div class="issue-item"><em>...and ${issues.length - 20} more</em></div>` : ''}
+      </div>
+    ` : ''}
+
+    <div class="preview-section">
+      <div class="tabs">
+        <button class="tab ${state.activeTab === 'preview' ? 'active' : ''}" data-tab="preview">Preview</button>
+        <button class="tab ${state.activeTab === 'mapping' ? 'active' : ''}" data-tab="mapping">Field Mapping</button>
+      </div>
+
+      ${state.activeTab === 'preview' ? renderPreviewTable(results) : renderMappingInfo()}
+    </div>
+
+    <div class="download-section">
+      <button class="primary" id="downloadCSV">Download CSV for Airtable</button>
+      <button class="secondary" id="downloadJSON">Download JSON</button>
+    </div>
+  `;
+}
+
+function renderPreviewTable(results) {
+  const displayFields = AIRTABLE_OUTPUT_FIELDS.filter(f => !f.startsWith('_'));
+  const previewRows = results.slice(0, 50);
+
+  return `
+    <h3>Preview (first 50 of ${results.length} records)</h3>
+    <div style="overflow-x: auto; max-height: 400px; overflow-y: auto;">
+      <table class="preview-table">
+        <thead>
+          <tr>${displayFields.map(f => `<th>${f}</th>`).join('')}</tr>
+        </thead>
+        <tbody>
+          ${previewRows.map(r => `
+            <tr>${displayFields.map(f => `<td title="${r[f] || ''}">${r[f] || ''}</td>`).join('')}</tr>
+          `).join('')}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+function setupEventListeners() {
+  const dropZone = document.getElementById('dropZone');
+  const fileInput = document.getElementById('fileInput');
+
+  if (dropZone && fileInput) {
+    dropZone.addEventListener('click', () => fileInput.click());
+    dropZone.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      dropZone.classList.add('dragover');
+    });
+    dropZone.addEventListener('dragleave', () => {
+      dropZone.classList.remove('dragover');
+    });
+    dropZone.addEventListener('drop', (e) => {
+      e.preventDefault();
+      dropZone.classList.remove('dragover');
+      handleFile(e.dataTransfer.files[0]);
+    });
+    fileInput.addEventListener('change', (e) => {
+      if (e.target.files[0]) handleFile(e.target.files[0]);
+    });
+  }
+
+  // Tab switching
+  document.querySelectorAll('.tab').forEach(tab => {
+    tab.addEventListener('click', () => {
+      state.activeTab = tab.dataset.tab;
+      render();
+    });
+  });
+
+  // Download buttons
+  const downloadCSV = document.getElementById('downloadCSV');
+  const downloadJSON = document.getElementById('downloadJSON');
+
+  if (downloadCSV) {
+    downloadCSV.addEventListener('click', () => {
+      const displayFields = AIRTABLE_OUTPUT_FIELDS.filter(f => !f.startsWith('_'));
+      const csv = exportToCSV(state.transformedData.results, displayFields);
+      const filename = state.fileName.replace(/\.[^.]+$/, '') + '_airtable.csv';
+      downloadFile(csv, filename, 'text/csv');
+    });
+  }
+
+  if (downloadJSON) {
+    downloadJSON.addEventListener('click', () => {
+      const json = exportToJSON(state.transformedData.results);
+      const filename = state.fileName.replace(/\.[^.]+$/, '') + '_airtable.json';
+      downloadFile(json, filename, 'application/json');
+    });
+  }
+}
+
+function handleFile(file) {
+  state.fileName = file.name;
+
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    const text = e.target.result;
+    const { headers, rows } = parseDelimitedText(text);
+
+    if (headers.length === 0) {
+      alert('Could not parse file. Please ensure it is a valid CSV or TSV.');
+      return;
+    }
+
+    state.clioData = { headers, rows };
+    state.transformedData = transformClioToAirtable(headers, rows);
+    render();
+  };
+  reader.readAsText(file);
+}
+
+// Initial render
+render();
+  </script>
+</body>
+</html>
