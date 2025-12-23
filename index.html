@@ -289,21 +289,25 @@ const generateCSV = (headers, rows) => {
 
 // Column name variations for client identification (will be matched case-insensitively)
 const CLIENT_NAME_PATTERNS = [
-  'client', 'client name', 'name', 'full name', 'fullname',
+  'client', 'client name', 'name', 'full name', 'fullname', 'client full name',
   // Spanish variations (including common typos)
   'nombre del cliente', 'nombre del ciente', 'nombre', 'cliente',
-  'nombre completo', 'nombre del client',
+  'nombre completo', 'nombre del client', 'nom del cliente',
+  'beneficiario', 'solicitante', 'applicant',
 ];
 const A_NUMBER_PATTERNS = [
   'a number', 'a- number', 'a#', 'a-number', 'alien number', 'a #',
-  'anumber', 'a num', 'a-num',
+  'anumber', 'a num', 'a-num', 'a no', 'a-no', 'alien #', 'alien no',
   // Spanish
   'numero a', 'número a', 'numero alien', 'número alien', 'num a',
+  'numero de alien', 'número de alien', 'num. a', 'no. a',
 ];
 const MATTER_PATTERNS = [
-  'matter', 'case matter', 'matter number', 'matter no',
+  'matter', 'case matter', 'matter number', 'matter no', 'case no', 'case number',
+  'case', 'file', 'file number', 'file no',
   // Spanish
   'caso', 'número de caso', 'numero de caso', 'materia', 'asunto',
+  'expediente', 'num caso', 'no. caso',
 ];
 
 // Generic column names to skip when looking for real headers
@@ -378,51 +382,75 @@ const hasGenericHeaders = (headers) => {
   return genericCount >= headers.length * 0.5; // More than half are generic
 };
 
+// Check if headers contain any recognizable column patterns
+const hasRecognizableHeaders = (headers) => {
+  if (!headers || headers.length === 0) return false;
+  return headers.some(h =>
+    columnMatches(h, CLIENT_NAME_PATTERNS) ||
+    columnMatches(h, A_NUMBER_PATTERNS) ||
+    columnMatches(h, MATTER_PATTERNS)
+  );
+};
+
+// Check if a row of values looks like a header row
+const rowLooksLikeHeaders = (values) => {
+  const hasClientCol = values.some(v => columnMatches(v, CLIENT_NAME_PATTERNS));
+  const hasANumCol = values.some(v => columnMatches(v, A_NUMBER_PATTERNS));
+  const hasMatterCol = values.some(v => columnMatches(v, MATTER_PATTERNS));
+  return hasClientCol || hasANumCol || hasMatterCol;
+};
+
+// Rebuild data using a specific row as headers
+const rebuildDataWithHeaders = (jsonData, headerRowIndex) => {
+  const headerRow = jsonData[headerRowIndex];
+  const newHeaders = Object.values(headerRow).map(v => String(v || '').trim());
+  const newData = [];
+
+  for (let j = headerRowIndex + 1; j < jsonData.length; j++) {
+    const dataRow = jsonData[j];
+    const newRow = {};
+    const oldValues = Object.values(dataRow);
+
+    newHeaders.forEach((header, idx) => {
+      if (header && oldValues[idx] !== undefined) {
+        newRow[header] = oldValues[idx];
+      }
+    });
+
+    // Only include non-empty rows
+    if (Object.values(newRow).some(v => v !== undefined && v !== null && String(v).trim() !== '')) {
+      newData.push(newRow);
+    }
+  }
+
+  return { newHeaders, newData };
+};
+
 // Find the real header row in sheet data (skips metadata rows)
 const findHeaderRow = (jsonData) => {
-  // Check if first row has generic headers
   if (jsonData.length === 0) return { headerRow: 0, data: jsonData };
 
   const firstRowHeaders = Object.keys(jsonData[0]);
 
-  if (hasGenericHeaders(firstRowHeaders)) {
-    // Look for a row that looks like headers (contains recognizable column names)
-    for (let i = 0; i < Math.min(jsonData.length, 10); i++) {
-      const row = jsonData[i];
-      const values = Object.values(row).map(v => String(v || '').trim());
+  // Case 1: First row headers are already recognizable - use as-is
+  if (hasRecognizableHeaders(firstRowHeaders) && !hasGenericHeaders(firstRowHeaders)) {
+    return { headerRow: 0, data: jsonData };
+  }
 
-      // Check if this row contains recognizable header names
-      const hasClientCol = values.some(v => columnMatches(v, CLIENT_NAME_PATTERNS));
-      const hasANumCol = values.some(v => columnMatches(v, A_NUMBER_PATTERNS));
-      const hasMatterCol = values.some(v => columnMatches(v, MATTER_PATTERNS));
+  // Case 2: Need to find the real header row
+  // Scan through first 10 rows looking for recognizable headers
+  for (let i = 0; i < Math.min(jsonData.length, 10); i++) {
+    const row = jsonData[i];
+    const values = Object.values(row).map(v => String(v || '').trim());
 
-      if (hasClientCol || hasANumCol || hasMatterCol) {
-        // This row looks like headers - rebuild data with these as column names
-        const newHeaders = values;
-        const newData = [];
-
-        for (let j = i + 1; j < jsonData.length; j++) {
-          const dataRow = jsonData[j];
-          const newRow = {};
-          const oldValues = Object.values(dataRow);
-
-          newHeaders.forEach((header, idx) => {
-            if (header && oldValues[idx] !== undefined) {
-              newRow[header] = oldValues[idx];
-            }
-          });
-
-          // Only include non-empty rows
-          if (Object.values(newRow).some(v => v !== undefined && v !== null && String(v).trim() !== '')) {
-            newData.push(newRow);
-          }
-        }
-
-        return { headerRow: i + 1, data: newData, detectedHeaders: newHeaders };
-      }
+    if (rowLooksLikeHeaders(values)) {
+      // This row looks like headers - rebuild data with these as column names
+      const { newHeaders, newData } = rebuildDataWithHeaders(jsonData, i);
+      return { headerRow: i + 1, data: newData, detectedHeaders: newHeaders };
     }
   }
 
+  // Case 3: No recognizable headers found - return as-is and hope for the best
   return { headerRow: 0, data: jsonData };
 };
 
@@ -867,10 +895,20 @@ function ClioAirtableMerger() {
           allClientRecords.push(...clientsFromSheet);
 
           const headerNote = headerRow > 0 ? ` (headers in row ${headerRow + 1})` : '';
-          reports.push({
-            type: 'success',
-            message: `Sheet "${sheetName}": ${jsonData.length} rows, ${clientsFromSheet.length} clients found${headerNote}`
-          });
+
+          if (clientsFromSheet.length === 0 && jsonData.length > 0) {
+            // Debug: show what headers were found to help identify missing patterns
+            const sampleHeaders = headers.slice(0, 8).join(', ');
+            reports.push({
+              type: 'warning',
+              message: `Sheet "${sheetName}": ${jsonData.length} rows, 0 clients found${headerNote}. Headers: [${sampleHeaders}...]`
+            });
+          } else {
+            reports.push({
+              type: 'success',
+              message: `Sheet "${sheetName}": ${jsonData.length} rows, ${clientsFromSheet.length} clients found${headerNote}`
+            });
+          }
         });
 
         // Merge clients across sheets
