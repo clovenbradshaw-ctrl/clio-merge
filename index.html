@@ -1520,6 +1520,33 @@ function ClioAirtableMerger() {
           if (!record.phone && row['Mobile Phone']) record.phone = row['Mobile Phone'];
           if (!record.phone && row['Primary Phone']) record.phone = row['Primary Phone'];
           if (!record.email && row['E-mail Address']) record.email = row['E-mail Address'];
+
+          // Address enrichment from Clio - Home address preferred, Business as fallback
+          if (!record.addressLine1) {
+            record.addressLine1 = row['Home Street'] || row['Business Street'] || '';
+          }
+          if (!record.addressLine2) {
+            record.addressLine2 = row['Home Street 2'] || row['Business Street 2'] || '';
+          }
+          if (!record.city) {
+            record.city = row['Home City'] || row['Business City'] || '';
+          }
+          if (!record.state) {
+            const rawState = row['Home State'] || row['Business State'] || '';
+            record.state = rawState ? rawState.trim().toUpperCase() : '';
+          }
+          if (!record.zip) {
+            const rawZip = row['Home Postal Code'] || row['Business Postal Code'] || '';
+            // Extract first 5 digits for standard US zip format
+            if (rawZip) {
+              const match = rawZip.match(/\d{5}/);
+              record.zip = match ? match[0] : rawZip.replace(/\D/g, '').slice(0, 5);
+            }
+          }
+          if (!record.country) {
+            record.country = row['Home Country/Region'] || row['Business Country/Region'] || '';
+          }
+
           record.clioContactId = row['UniqueId'] || '';
           contactMatches++;
           if (matchedSamples.length < 5) {
