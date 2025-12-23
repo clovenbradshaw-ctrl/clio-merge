@@ -726,6 +726,228 @@ function ClioAirtableMerger() {
   });
   const [caseNoteResult, setCaseNoteResult] = useState(null);
 
+  // API Sync State
+  const [syncState, setSyncState] = useState({
+    loading: false,
+    existingRecords: [],
+    preview: { new: [], existing: [], errors: [] },
+    logs: [],
+    progress: { current: 0, total: 0, phase: '' }
+  });
+
+  // Add sync log
+  const addSyncLog = (message, type = 'info') => {
+    setSyncState(prev => ({
+      ...prev,
+      logs: [...prev.logs, { message, type, time: new Date().toLocaleTimeString() }]
+    }));
+  };
+
+  // Fetch existing Client Info records for deduplication
+  const fetchExistingClients = async () => {
+    if (!airtableApiKey || !devToolsBaseId) {
+      addSyncLog('Please enter API key and select a Base first', 'error');
+      return;
+    }
+
+    setSyncState(prev => ({ ...prev, loading: true, logs: [] }));
+    addSyncLog('Fetching existing Client Info records...', 'info');
+
+    try {
+      const allRecords = [];
+      let offset = null;
+
+      do {
+        const params = new URLSearchParams();
+        ['A#', 'clio_contact_id', 'Client ID', 'First Name', 'Family Name'].forEach(f => params.append('fields[]', f));
+        if (offset) params.append('offset', offset);
+
+        const response = await fetch(
+          `https://api.airtable.com/v0/${devToolsBaseId}/Client%20Info?${params.toString()}`,
+          { headers: { 'Authorization': `Bearer ${airtableApiKey}` } }
+        );
+
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const data = await response.json();
+        allRecords.push(...data.records);
+        offset = data.offset;
+        addSyncLog(`Fetched ${allRecords.length} records...`, 'info');
+      } while (offset);
+
+      setSyncState(prev => ({ ...prev, existingRecords: allRecords, loading: false }));
+      addSyncLog(`Total: ${allRecords.length} existing records in Client Info`, 'success');
+
+      // Build lookup stats
+      const withANum = allRecords.filter(r => r.fields['A#']).length;
+      const withClio = allRecords.filter(r => r.fields['clio_contact_id']).length;
+      addSyncLog(`  - ${withANum} with A#, ${withClio} with clio_contact_id`, 'info');
+    } catch (err) {
+      addSyncLog(`Error: ${err.message}`, 'error');
+      setSyncState(prev => ({ ...prev, loading: false }));
+    }
+  };
+
+  // Check for duplicates against existing records
+  const checkDuplicates = () => {
+    if (!phase1Result?.clients?.length) {
+      addSyncLog('No Phase 1 data to check', 'error');
+      return;
+    }
+
+    addSyncLog(`Checking ${phase1Result.clients.length} records for duplicates...`, 'info');
+
+    // Build lookup maps from existing records
+    const aNumLookup = new Map();
+    const clioIdLookup = new Map();
+    const clientIdLookup = new Map();
+
+    syncState.existingRecords.forEach(rec => {
+      if (rec.fields['A#']) aNumLookup.set(rec.fields['A#'].toLowerCase().trim(), rec);
+      if (rec.fields['clio_contact_id']) clioIdLookup.set(String(rec.fields['clio_contact_id']).toLowerCase().trim(), rec);
+      if (rec.fields['Client ID']) clientIdLookup.set(rec.fields['Client ID'].toLowerCase().trim(), rec);
+    });
+
+    const preview = { new: [], existing: [], errors: [] };
+
+    phase1Result.clients.forEach((client, idx) => {
+      let existingRecord = null;
+      let matchedOn = '';
+
+      // Check A# first (most reliable)
+      if (client['A#']) {
+        const match = aNumLookup.get(client['A#'].toLowerCase().trim());
+        if (match) { existingRecord = match; matchedOn = `A#: ${client['A#']}`; }
+      }
+
+      // Check clio_contact_id
+      if (!existingRecord && client['clio_contact_id']) {
+        const match = clioIdLookup.get(String(client['clio_contact_id']).toLowerCase().trim());
+        if (match) { existingRecord = match; matchedOn = `clio_contact_id: ${client['clio_contact_id']}`; }
+      }
+
+      // Check Client ID
+      if (!existingRecord && client['Client ID']) {
+        const match = clientIdLookup.get(client['Client ID'].toLowerCase().trim());
+        if (match) { existingRecord = match; matchedOn = `Client ID: ${client['Client ID']}`; }
+      }
+
+      if (existingRecord) {
+        preview.existing.push({ client, existingRecord, matchedOn, idx });
+      } else if (!client['First Name'] && !client['Family Name']) {
+        preview.errors.push({ client, error: 'Missing name', idx });
+      } else {
+        preview.new.push({ client, idx });
+      }
+    });
+
+    setSyncState(prev => ({ ...prev, preview }));
+    addSyncLog(`Duplicate check complete:`, 'success');
+    addSyncLog(`  - ${preview.new.length} NEW records to create`, 'info');
+    addSyncLog(`  - ${preview.existing.length} EXISTING (will skip)`, 'warning');
+    addSyncLog(`  - ${preview.errors.length} with errors`, preview.errors.length > 0 ? 'error' : 'info');
+  };
+
+  // Upload new records to Airtable
+  const uploadToAirtable = async (testMode = false) => {
+    const recordsToCreate = testMode ? syncState.preview.new.slice(0, 5) : syncState.preview.new;
+
+    if (recordsToCreate.length === 0) {
+      addSyncLog('No new records to upload', 'warning');
+      return;
+    }
+
+    setSyncState(prev => ({ ...prev, loading: true, progress: { current: 0, total: recordsToCreate.length, phase: 'Uploading' } }));
+    addSyncLog(`${testMode ? 'TEST: ' : ''}Starting upload of ${recordsToCreate.length} records...`, 'info');
+
+    let created = 0;
+    let failed = 0;
+
+    // Process in batches of 10
+    for (let i = 0; i < recordsToCreate.length; i += 10) {
+      const batch = recordsToCreate.slice(i, i + 10);
+
+      const airtableRecords = batch.map(({ client }) => ({
+        fields: {
+          'Client ID': client['Client ID'] || '',
+          'A#': client['A#'] || '',
+          'First Name': client['First Name'] || '',
+          'Middle Name': client['Middle Name'] || '',
+          'Family Name': client['Family Name'] || '',
+          'Phone Number': client['Phone Number'] || '',
+          'Client Email': client['Client Email'] || '',
+          'Address Line 1': client['Address Line 1'] || '',
+          'Address Line 2': client['Address Line 2'] || '',
+          'City': client['City'] || '',
+          'State': client['State'] || '',
+          'Zip (5)': client['Zip (5)'] || '',
+          'Country': client['Country'] || '',
+          'Entry Date': client['Entry Date'] || null,
+          'Place of Entry': client['Place of Entry'] || '',
+          'DOB': client['DOB'] || null,
+          'clio_contact_id': client['clio_contact_id'] || '',
+          'ICH Atty': [ANDREW_BAHR_RECORD_ID],
+          'Bahr Client': true,
+          'uscis_flatpack_data': client['uscis_flatpack_data'] || ''
+        }
+      }));
+
+      // Clean empty fields
+      airtableRecords.forEach(rec => {
+        Object.keys(rec.fields).forEach(key => {
+          if (rec.fields[key] === '' || rec.fields[key] === null) {
+            delete rec.fields[key];
+          }
+        });
+        // Always keep ICH Atty and Bahr Client
+        rec.fields['ICH Atty'] = [ANDREW_BAHR_RECORD_ID];
+        rec.fields['Bahr Client'] = true;
+      });
+
+      try {
+        const response = await fetch(
+          `https://api.airtable.com/v0/${devToolsBaseId}/Client%20Info`,
+          {
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${airtableApiKey}`,
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ records: airtableRecords })
+          }
+        );
+
+        if (!response.ok) {
+          const errData = await response.json().catch(() => ({}));
+          throw new Error(errData.error?.message || `HTTP ${response.status}`);
+        }
+
+        const result = await response.json();
+        created += result.records.length;
+        addSyncLog(`Batch ${Math.floor(i/10) + 1}: Created ${result.records.length} records`, 'success');
+
+        setSyncState(prev => ({
+          ...prev,
+          progress: { ...prev.progress, current: i + batch.length }
+        }));
+      } catch (err) {
+        failed += batch.length;
+        addSyncLog(`Batch ${Math.floor(i/10) + 1} failed: ${err.message}`, 'error');
+      }
+
+      // Rate limiting - wait 250ms between batches
+      await new Promise(resolve => setTimeout(resolve, 250));
+    }
+
+    setSyncState(prev => ({ ...prev, loading: false, progress: { current: recordsToCreate.length, total: recordsToCreate.length, phase: 'Complete' } }));
+    addSyncLog(`Upload complete: ${created} created, ${failed} failed`, created > 0 ? 'success' : 'error');
+
+    // Refresh existing records and re-check duplicates
+    if (created > 0) {
+      await fetchExistingClients();
+      checkDuplicates();
+    }
+  };
+
   // Fetch Airtable bases
   const fetchAirtableBases = async () => {
     if (!airtableApiKey) {
@@ -2855,10 +3077,175 @@ function ClioAirtableMerger() {
                     </table>
                   </div>
 
-                  <div style={{ marginTop: '1.5rem', padding: '1rem', background: 'rgba(34, 197, 94, 0.1)', borderRadius: '8px', border: '1px solid rgba(34, 197, 94, 0.3)' }}>
-                    <h4 style={{ color: '#4ade80', marginBottom: '0.5rem' }}>Next Steps</h4>
+                  {/* API Upload Section */}
+                  <div style={{ marginTop: '1.5rem', padding: '1rem', background: 'rgba(99, 102, 241, 0.1)', borderRadius: '8px', border: '1px solid rgba(99, 102, 241, 0.3)' }}>
+                    <h4 style={{ color: '#a5b4fc', marginBottom: '1rem' }}>API Upload to Airtable</h4>
+                    <p style={{ fontSize: '0.8rem', color: '#71717a', marginBottom: '1rem' }}>
+                      Upload directly to Client Info table with duplicate checking. ICH Atty: <code style={{ background: '#1e293b', padding: '2px 6px', borderRadius: '4px' }}>{ANDREW_BAHR_RECORD_ID}</code>
+                    </p>
+
+                    {/* API Config */}
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', marginBottom: '1rem' }}>
+                      <div>
+                        <label style={{ fontSize: '0.75rem', color: '#94a3b8', display: 'block', marginBottom: '0.25rem' }}>API Key</label>
+                        <input
+                          type="password"
+                          value={airtableApiKey}
+                          onChange={(e) => setAirtableApiKey(e.target.value)}
+                          placeholder="pat..."
+                          style={{ width: '100%', padding: '0.5rem', background: '#1e293b', border: '1px solid #475569', borderRadius: '6px', color: '#e2e8f0', fontSize: '0.8rem' }}
+                        />
+                      </div>
+                      <div>
+                        <label style={{ fontSize: '0.75rem', color: '#94a3b8', display: 'block', marginBottom: '0.25rem' }}>Base ID</label>
+                        <input
+                          type="text"
+                          value={devToolsBaseId}
+                          onChange={(e) => setDevToolsBaseId(e.target.value)}
+                          placeholder="app..."
+                          style={{ width: '100%', padding: '0.5rem', background: '#1e293b', border: '1px solid #475569', borderRadius: '6px', color: '#e2e8f0', fontSize: '0.8rem' }}
+                        />
+                      </div>
+                    </div>
+
+                    {/* Stats Row */}
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: '0.5rem', marginBottom: '1rem' }}>
+                      <div style={{ background: '#1e293b', padding: '0.75rem', borderRadius: '6px', textAlign: 'center' }}>
+                        <div style={{ fontSize: '1.5rem', fontWeight: 'bold', color: '#6366f1' }}>{phase1Result?.clients?.length || 0}</div>
+                        <div style={{ fontSize: '0.7rem', color: '#94a3b8' }}>Source</div>
+                      </div>
+                      <div style={{ background: '#1e293b', padding: '0.75rem', borderRadius: '6px', textAlign: 'center' }}>
+                        <div style={{ fontSize: '1.5rem', fontWeight: 'bold', color: '#94a3b8' }}>{syncState.existingRecords.length}</div>
+                        <div style={{ fontSize: '0.7rem', color: '#94a3b8' }}>In Airtable</div>
+                      </div>
+                      <div style={{ background: '#1e293b', padding: '0.75rem', borderRadius: '6px', textAlign: 'center' }}>
+                        <div style={{ fontSize: '1.5rem', fontWeight: 'bold', color: '#10b981' }}>{syncState.preview.new.length}</div>
+                        <div style={{ fontSize: '0.7rem', color: '#94a3b8' }}>New</div>
+                      </div>
+                      <div style={{ background: '#1e293b', padding: '0.75rem', borderRadius: '6px', textAlign: 'center' }}>
+                        <div style={{ fontSize: '1.5rem', fontWeight: 'bold', color: '#f59e0b' }}>{syncState.preview.existing.length}</div>
+                        <div style={{ fontSize: '0.7rem', color: '#94a3b8' }}>Duplicates</div>
+                      </div>
+                      <div style={{ background: '#1e293b', padding: '0.75rem', borderRadius: '6px', textAlign: 'center' }}>
+                        <div style={{ fontSize: '1.5rem', fontWeight: 'bold', color: '#ef4444' }}>{syncState.preview.errors.length}</div>
+                        <div style={{ fontSize: '0.7rem', color: '#94a3b8' }}>Errors</div>
+                      </div>
+                    </div>
+
+                    {/* Action Buttons */}
+                    <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', marginBottom: '1rem' }}>
+                      <button
+                        className="btn btn-primary"
+                        onClick={fetchExistingClients}
+                        disabled={syncState.loading || !airtableApiKey || !devToolsBaseId}
+                        style={{ fontSize: '0.8rem' }}
+                      >
+                        {syncState.loading ? 'Loading...' : '1. Fetch Existing'}
+                      </button>
+                      <button
+                        className="btn btn-secondary"
+                        onClick={checkDuplicates}
+                        disabled={syncState.loading || syncState.existingRecords.length === 0}
+                        style={{ fontSize: '0.8rem' }}
+                      >
+                        2. Check Duplicates
+                      </button>
+                      <button
+                        onClick={() => uploadToAirtable(true)}
+                        disabled={syncState.loading || syncState.preview.new.length === 0}
+                        style={{ fontSize: '0.8rem', padding: '0.5rem 1rem', background: '#f59e0b', color: 'white', border: 'none', borderRadius: '6px', cursor: 'pointer' }}
+                      >
+                        3. Test Upload (5)
+                      </button>
+                      <button
+                        onClick={() => uploadToAirtable(false)}
+                        disabled={syncState.loading || syncState.preview.new.length === 0}
+                        style={{ fontSize: '0.8rem', padding: '0.5rem 1rem', background: '#10b981', color: 'white', border: 'none', borderRadius: '6px', cursor: 'pointer' }}
+                      >
+                        4. Upload All ({syncState.preview.new.length})
+                      </button>
+                    </div>
+
+                    {/* Progress Bar */}
+                    {syncState.progress.total > 0 && (
+                      <div style={{ marginBottom: '1rem' }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.75rem', color: '#94a3b8', marginBottom: '0.25rem' }}>
+                          <span>{syncState.progress.phase}</span>
+                          <span>{syncState.progress.current} / {syncState.progress.total}</span>
+                        </div>
+                        <div style={{ background: '#1e293b', borderRadius: '4px', height: '8px', overflow: 'hidden' }}>
+                          <div style={{ height: '100%', background: 'linear-gradient(90deg, #6366f1, #10b981)', width: `${(syncState.progress.current / syncState.progress.total) * 100}%`, transition: 'width 0.3s' }} />
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Logs */}
+                    {syncState.logs.length > 0 && (
+                      <div style={{ background: '#0f172a', borderRadius: '6px', padding: '0.75rem', maxHeight: '150px', overflowY: 'auto', fontSize: '0.75rem', fontFamily: 'monospace' }}>
+                        {syncState.logs.map((log, i) => (
+                          <div key={i} style={{ color: log.type === 'error' ? '#ef4444' : log.type === 'success' ? '#10b981' : log.type === 'warning' ? '#f59e0b' : '#94a3b8', marginBottom: '0.25rem' }}>
+                            <span style={{ color: '#475569' }}>[{log.time}]</span> {log.message}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    {/* Preview of new records */}
+                    {syncState.preview.new.length > 0 && (
+                      <div style={{ marginTop: '1rem' }}>
+                        <h5 style={{ fontSize: '0.8rem', color: '#10b981', marginBottom: '0.5rem' }}>New Records Preview (first 10)</h5>
+                        <div style={{ maxHeight: '200px', overflowY: 'auto', fontSize: '0.7rem' }}>
+                          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                            <thead>
+                              <tr style={{ background: '#1e293b' }}>
+                                <th style={{ padding: '0.5rem', textAlign: 'left', borderBottom: '1px solid #334155' }}>Name</th>
+                                <th style={{ padding: '0.5rem', textAlign: 'left', borderBottom: '1px solid #334155' }}>A#</th>
+                                <th style={{ padding: '0.5rem', textAlign: 'left', borderBottom: '1px solid #334155' }}>clio_contact_id</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {syncState.preview.new.slice(0, 10).map((item, i) => (
+                                <tr key={i} style={{ borderBottom: '1px solid #1e293b' }}>
+                                  <td style={{ padding: '0.5rem' }}>{item.client['First Name']} {item.client['Family Name']}</td>
+                                  <td style={{ padding: '0.5rem' }}>{item.client['A#'] || '—'}</td>
+                                  <td style={{ padding: '0.5rem', fontFamily: 'monospace' }}>{item.client['clio_contact_id'] || '—'}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Duplicates preview */}
+                    {syncState.preview.existing.length > 0 && (
+                      <div style={{ marginTop: '1rem' }}>
+                        <h5 style={{ fontSize: '0.8rem', color: '#f59e0b', marginBottom: '0.5rem' }}>Duplicates Found (first 10) - Will Skip</h5>
+                        <div style={{ maxHeight: '150px', overflowY: 'auto', fontSize: '0.7rem' }}>
+                          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                            <thead>
+                              <tr style={{ background: '#1e293b' }}>
+                                <th style={{ padding: '0.5rem', textAlign: 'left', borderBottom: '1px solid #334155' }}>Name</th>
+                                <th style={{ padding: '0.5rem', textAlign: 'left', borderBottom: '1px solid #334155' }}>Matched On</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {syncState.preview.existing.slice(0, 10).map((item, i) => (
+                                <tr key={i} style={{ borderBottom: '1px solid #1e293b' }}>
+                                  <td style={{ padding: '0.5rem' }}>{item.client['First Name']} {item.client['Family Name']}</td>
+                                  <td style={{ padding: '0.5rem', color: '#f59e0b' }}>{item.matchedOn}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  <div style={{ marginTop: '1rem', padding: '1rem', background: 'rgba(34, 197, 94, 0.1)', borderRadius: '8px', border: '1px solid rgba(34, 197, 94, 0.3)' }}>
+                    <h4 style={{ color: '#4ade80', marginBottom: '0.5rem' }}>Next Steps (after upload)</h4>
                     <ol style={{ fontSize: '0.875rem', color: '#a1a1aa', paddingLeft: '1.25rem' }}>
-                      <li>Import <code>phase1_clients.csv</code> to Airtable Client Info table</li>
                       <li>Export Client Info table (include Record ID and clio_contact_id columns)</li>
                       <li>Proceed to Phase 2 with the export</li>
                     </ol>
