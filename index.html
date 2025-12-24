@@ -2924,6 +2924,103 @@ function ClioAirtableMerger() {
     setPhase2Report(reports);
   }, [phase2Data]);
 
+  // Upload Case Master Views to Airtable
+  const uploadCaseMasterViewsToAirtable = async (testMode = false) => {
+    if (!phase2Result?.caseMaster?.length) {
+      addPhase2Log('No Case Master Views to upload. Generate them first.', 'warning');
+      return;
+    }
+
+    const recordsToCreate = testMode ? phase2Result.caseMaster.slice(0, 5) : phase2Result.caseMaster;
+
+    // Filter to only records with valid Client links (optional - include all for completeness)
+    const validRecords = recordsToCreate;
+
+    if (validRecords.length === 0) {
+      addPhase2Log('No records to upload', 'warning');
+      return;
+    }
+
+    setPhase2Sync(prev => ({
+      ...prev,
+      loading: true,
+      progress: { current: 0, total: validRecords.length, phase: 'Uploading Case Master Views' }
+    }));
+
+    addPhase2Log(`${testMode ? 'TEST: ' : ''}Starting upload of ${validRecords.length} Case Master Views...`, 'info');
+
+    let created = 0;
+    let failed = 0;
+
+    // Process in batches of 10 (Airtable API limit)
+    for (let i = 0; i < validRecords.length; i += 10) {
+      const batch = validRecords.slice(i, i + 10);
+
+      const airtableRecords = batch.map(record => {
+        const fields = {
+          'clio_matter_id': record['clio_matter_id'] || '',
+          'PP ID': record['PP ID'] || '',
+          'Description': record['Description'] || '',
+          'File Case Status': record['File Case Status'] || '',
+          'Case Notes': record['Case Notes'] || '',
+          'Bahr Client': true,
+        };
+
+        // Only add Client link if we have a valid record ID
+        if (record['Client'] && record['Client'].length > 0 && record['Client'][0]) {
+          fields['Client'] = record['Client']; // Already in array format
+        }
+
+        return { fields };
+      });
+
+      try {
+        const response = await fetch(
+          `https://api.airtable.com/v0/${AIRTABLE_BASE_ID}/Case%20Master%20View`,
+          {
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${airtableApiKey}`,
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ records: airtableRecords })
+          }
+        );
+
+        if (!response.ok) {
+          const errData = await response.json().catch(() => ({}));
+          throw new Error(errData.error?.message || `HTTP ${response.status}`);
+        }
+
+        const result = await response.json();
+        created += result.records.length;
+        addPhase2Log(`Batch ${Math.floor(i/10) + 1}: Created ${result.records.length} records`, 'success');
+
+        setPhase2Sync(prev => ({
+          ...prev,
+          progress: { ...prev.progress, current: i + batch.length }
+        }));
+      } catch (err) {
+        failed += batch.length;
+        addPhase2Log(`Batch ${Math.floor(i/10) + 1} failed: ${err.message}`, 'error');
+      }
+
+      // Rate limiting: 250ms between batches (Airtable allows 5 req/sec)
+      await new Promise(resolve => setTimeout(resolve, 250));
+    }
+
+    setPhase2Sync(prev => ({
+      ...prev,
+      loading: false,
+      progress: { current: validRecords.length, total: validRecords.length, phase: 'Upload Complete' }
+    }));
+
+    addPhase2Log(
+      `Upload complete: ${created} created, ${failed} failed`,
+      created > 0 ? 'success' : 'error'
+    );
+  };
+
   // Phase 3: Events & Relationships
   const runPhase3 = useCallback(() => {
     const reports = [];
@@ -4420,12 +4517,96 @@ function ClioAirtableMerger() {
                     </table>
                   </div>
 
-                  <div style={{ marginTop: '1.5rem', padding: '1rem', background: 'rgba(34, 197, 94, 0.1)', borderRadius: '8px', border: '1px solid rgba(34, 197, 94, 0.3)' }}>
-                    <h4 style={{ color: '#4ade80', marginBottom: '0.5rem' }}>Next Steps</h4>
+                  {/* Direct Upload to Airtable Section */}
+                  <div style={{ marginTop: '1.5rem', padding: '1rem', background: 'rgba(99, 102, 241, 0.1)', borderRadius: '8px', border: '1px solid rgba(99, 102, 241, 0.3)' }}>
+                    <h4 style={{ color: '#a5b4fc', marginBottom: '1rem' }}>Direct Upload to Airtable</h4>
+                    <p style={{ fontSize: '0.8rem', color: '#71717a', marginBottom: '1rem' }}>
+                      Upload Case Master Views directly to Airtable. Base ID: <code style={{ background: '#1e293b', padding: '2px 6px', borderRadius: '4px' }}>{AIRTABLE_BASE_ID}</code>
+                    </p>
+
+                    {/* Stats Row */}
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '0.5rem', marginBottom: '1rem' }}>
+                      <div style={{ background: '#1e293b', padding: '0.75rem', borderRadius: '6px', textAlign: 'center' }}>
+                        <div style={{ fontSize: '1.5rem', fontWeight: 'bold', color: '#6366f1' }}>{phase2Result?.caseMaster?.length || 0}</div>
+                        <div style={{ fontSize: '0.7rem', color: '#71717a' }}>Total Records</div>
+                      </div>
+                      <div style={{ background: '#1e293b', padding: '0.75rem', borderRadius: '6px', textAlign: 'center' }}>
+                        <div style={{ fontSize: '1.5rem', fontWeight: 'bold', color: '#22c55e' }}>{phase2Result?.caseMaster?.filter(r => r['Client']?.length > 0).length || 0}</div>
+                        <div style={{ fontSize: '0.7rem', color: '#71717a' }}>With Client Link</div>
+                      </div>
+                      <div style={{ background: '#1e293b', padding: '0.75rem', borderRadius: '6px', textAlign: 'center' }}>
+                        <div style={{ fontSize: '1.5rem', fontWeight: 'bold', color: '#f59e0b' }}>{phase2Result?.caseMaster?.filter(r => !r['Client'] || r['Client'].length === 0).length || 0}</div>
+                        <div style={{ fontSize: '0.7rem', color: '#71717a' }}>Without Link</div>
+                      </div>
+                    </div>
+
+                    {/* Progress bar during upload */}
+                    {phase2Sync.loading && phase2Sync.progress.phase === 'Uploading Case Master Views' && (
+                      <div style={{ marginBottom: '1rem' }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.75rem', color: '#94a3b8', marginBottom: '0.25rem' }}>
+                          <span>{phase2Sync.progress.phase}</span>
+                          <span>{phase2Sync.progress.current} / {phase2Sync.progress.total}</span>
+                        </div>
+                        <div style={{ background: '#1e293b', borderRadius: '4px', height: '8px', overflow: 'hidden' }}>
+                          <div style={{
+                            height: '100%',
+                            background: 'linear-gradient(90deg, #6366f1, #a855f7)',
+                            width: `${(phase2Sync.progress.current / phase2Sync.progress.total) * 100}%`,
+                            transition: 'width 0.3s ease'
+                          }} />
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Upload Buttons */}
+                    <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap' }}>
+                      <button
+                        onClick={() => uploadCaseMasterViewsToAirtable(true)}
+                        disabled={phase2Sync.loading || !airtableApiKey}
+                        style={{
+                          padding: '0.5rem 1rem',
+                          background: phase2Sync.loading || !airtableApiKey ? '#374151' : '#475569',
+                          color: 'white',
+                          border: 'none',
+                          borderRadius: '6px',
+                          cursor: phase2Sync.loading || !airtableApiKey ? 'not-allowed' : 'pointer',
+                          fontSize: '0.8rem',
+                          opacity: phase2Sync.loading || !airtableApiKey ? 0.6 : 1
+                        }}
+                      >
+                        Test Upload (5 records)
+                      </button>
+                      <button
+                        onClick={() => uploadCaseMasterViewsToAirtable(false)}
+                        disabled={phase2Sync.loading || !airtableApiKey}
+                        style={{
+                          padding: '0.5rem 1rem',
+                          background: phase2Sync.loading || !airtableApiKey ? '#374151' : '#6366f1',
+                          color: 'white',
+                          border: 'none',
+                          borderRadius: '6px',
+                          cursor: phase2Sync.loading || !airtableApiKey ? 'not-allowed' : 'pointer',
+                          fontSize: '0.8rem',
+                          opacity: phase2Sync.loading || !airtableApiKey ? 0.6 : 1
+                        }}
+                      >
+                        Upload All ({phase2Result?.caseMaster?.length || 0} records)
+                      </button>
+                    </div>
+
+                    {!airtableApiKey && (
+                      <div style={{ marginTop: '0.75rem', fontSize: '0.75rem', color: '#f59e0b' }}>
+                        Enter API key in Phase 1 first to enable uploads
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Next Steps (after upload) */}
+                  <div style={{ marginTop: '1rem', padding: '1rem', background: 'rgba(34, 197, 94, 0.1)', borderRadius: '8px', border: '1px solid rgba(34, 197, 94, 0.3)' }}>
+                    <h4 style={{ color: '#4ade80', marginBottom: '0.5rem' }}>Next Steps (after upload)</h4>
                     <ol style={{ fontSize: '0.875rem', color: '#a1a1aa', paddingLeft: '1.25rem' }}>
-                      <li>Import <code>phase2_case_master_views.csv</code> to Airtable Case Master View table</li>
-                      <li>Export Case Master View table (include Record ID and clio_matter_id columns)</li>
-                      <li>Proceed to Phase 3 with both exports</li>
+                      <li>Export Case Master View table from Airtable (include Record ID and clio_matter_id columns)</li>
+                      <li>Proceed to Phase 3 with the Client Info and Case Master View exports</li>
                     </ol>
                   </div>
                 </div>
