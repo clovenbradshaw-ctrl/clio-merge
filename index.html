@@ -3123,8 +3123,8 @@ function ClioAirtableMerger() {
             value = matter[config.inputField] || '';
         }
 
-        // Store value with field ID as key
-        outputRecord[fieldId] = value;
+        // Store value with field name as key (for CSV compatibility)
+        outputRecord[config.fieldName] = value;
         // Also store mapping info for display/debugging
         outputRecord._fieldMapping[fieldId] = {
           fieldName: config.fieldName,
@@ -5057,7 +5057,7 @@ function ClioAirtableMerger() {
                         onClick={() => {
                           const headers = Object.entries(phase2FieldMapping.outputFields)
                             .filter(([, config]) => config.enabled)
-                            .map(([, config]) => config.outputName);
+                            .map(([, config]) => config.fieldName);
                           if (phase2FieldMapping.includeInternalFields) {
                             headers.push('_client_name', '_note_count');
                           }
@@ -5073,7 +5073,7 @@ function ClioAirtableMerger() {
                           // Download with all fields including internal ones
                           const headers = Object.entries(phase2FieldMapping.outputFields)
                             .filter(([, config]) => config.enabled)
-                            .map(([, config]) => config.outputName);
+                            .map(([, config]) => config.fieldName);
                           headers.push('_client_name', '_note_count');
                           downloadCSV(phase2Result.caseMaster, 'case_master_views_full.csv', headers);
                         }}
@@ -5083,7 +5083,7 @@ function ClioAirtableMerger() {
                       </button>
                     </div>
                     <p style={{ fontSize: '0.7rem', color: '#71717a', marginTop: '0.75rem', marginBottom: 0 }}>
-                      Includes: {Object.entries(phase2FieldMapping.outputFields).filter(([, config]) => config.enabled).map(([, config]) => config.outputName).join(', ')}
+                      Includes: {Object.entries(phase2FieldMapping.outputFields).filter(([, config]) => config.enabled).map(([, config]) => config.fieldName).join(', ')}
                     </p>
                   </div>
 
@@ -5095,7 +5095,7 @@ function ClioAirtableMerger() {
                             .filter(([, config]) => config.enabled)
                             .slice(0, 4)
                             .map(([key, config]) => (
-                              <th key={key}>{config.outputName}</th>
+                              <th key={key}>{config.fieldName}</th>
                             ))}
                           <th>Notes</th>
                         </tr>
@@ -5108,7 +5108,7 @@ function ClioAirtableMerger() {
                           return (
                             <tr key={i}>
                               {enabledFields.map(([key, config]) => {
-                                const value = row[config.outputName];
+                                const value = row[config.fieldName];
                                 // Format display based on field type
                                 if (config.inputField === '_client_record_id') {
                                   return <td key={key} style={{ fontFamily: 'monospace', fontSize: '0.7rem' }}>{value?.length ? '...' : '—'}</td>;
