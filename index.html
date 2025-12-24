@@ -735,10 +735,10 @@ function ClioAirtableMerger() {
   const [phase4Report, setPhase4Report] = useState([]);
   const [phase4Progress, setPhase4Progress] = useState({ current: 0, total: 0, status: 'idle' });
 
-  // Developer Tools state
-  const [airtableApiKey, setAirtableApiKey] = useState('');
-  const [devToolsBaseId, setDevToolsBaseId] = useState('');
-  const [devToolsTableName, setDevToolsTableName] = useState('');
+  // Developer Tools state - initialized from localStorage
+  const [airtableApiKey, setAirtableApiKey] = useState(localStorage.getItem('airtable_api_key') || '');
+  const [devToolsBaseId, setDevToolsBaseId] = useState(localStorage.getItem('airtable_base_id') || '');
+  const [devToolsTableName, setDevToolsTableName] = useState(localStorage.getItem('airtable_table_name') || '');
   const [devToolsRecordId, setDevToolsRecordId] = useState('');
   const [devToolsSchema, setDevToolsSchema] = useState(null);
   const [devToolsRecord, setDevToolsRecord] = useState(null);
@@ -799,6 +799,13 @@ function ClioAirtableMerger() {
       [sourceField]: { ...prev[sourceField], enabled: !prev[sourceField].enabled }
     }));
   };
+
+  // Auto-save API key, base ID, and table name to localStorage
+  useEffect(() => {
+    if (airtableApiKey) localStorage.setItem('airtable_api_key', airtableApiKey);
+    if (devToolsBaseId) localStorage.setItem('airtable_base_id', devToolsBaseId);
+    if (devToolsTableName) localStorage.setItem('airtable_table_name', devToolsTableName);
+  }, [airtableApiKey, devToolsBaseId, devToolsTableName]);
 
   // Add sync log
   const addSyncLog = (message, type = 'info') => {
