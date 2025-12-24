@@ -2651,7 +2651,7 @@ function ClioAirtableMerger() {
         'Place of Entry': record.placeOfEntry,
         'DOB': record.dob,
         'clio_contact_id': record.clioContactId,
-        'ICH Atty': ANDREW_BAHR_RECORD_ID,
+        'ICH Atty': [ANDREW_BAHR_RECORD_ID], // Link field - must be array of record IDs
         'Bahr Client': 'TRUE',
         'uscis_flatpack_data': JSON.stringify(record._flatpackData),
       });
