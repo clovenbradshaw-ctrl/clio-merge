@@ -931,7 +931,7 @@ function ClioAirtableMerger() {
     for (let i = 0; i < recordsToCreate.length; i += 10) {
       const batch = recordsToCreate.slice(i, i + 10);
 
-      const airtableRecords = batch.map(({ client }) => {
+      const airtableRecords = batch.map(({ client }, batchIdx) => {
         const fields = {};
 
         // Apply field mapping - only include enabled fields
@@ -948,8 +948,20 @@ function ClioAirtableMerger() {
         fields['ICH Atty'] = [ANDREW_BAHR_RECORD_ID];
         fields['Bahr Client'] = true;
 
+        // VERBOSE LOGGING: Log each record's fields
+        const recordName = `${fields['First Name'] || ''} ${fields['Family Name'] || ''}`.trim() || `Record ${batchIdx + 1}`;
+        addSyncLog(`  Preparing: ${recordName}`, 'info');
+        Object.entries(fields).forEach(([fieldName, fieldValue]) => {
+          const displayValue = Array.isArray(fieldValue) ? `[${fieldValue.join(', ')}]` : fieldValue;
+          const valueType = Array.isArray(fieldValue) ? '(array)' : `(${typeof fieldValue})`;
+          addSyncLog(`    ${fieldName}: ${displayValue} ${valueType}`, 'info');
+        });
+
         return { fields };
       });
+
+      // Log the full payload being sent
+      addSyncLog(`Sending batch ${Math.floor(i/10) + 1} to Airtable...`, 'info');
 
       try {
         const response = await fetch(
@@ -966,6 +978,8 @@ function ClioAirtableMerger() {
 
         if (!response.ok) {
           const errData = await response.json().catch(() => ({}));
+          // Enhanced error logging - show full error details
+          addSyncLog(`API Error Response: ${JSON.stringify(errData)}`, 'error');
           throw new Error(errData.error?.message || `HTTP ${response.status}`);
         }
 
@@ -980,6 +994,11 @@ function ClioAirtableMerger() {
       } catch (err) {
         failed += batch.length;
         addSyncLog(`Batch ${Math.floor(i/10) + 1} failed: ${err.message}`, 'error');
+        // Log the full payload that failed
+        addSyncLog(`Failed payload:`, 'error');
+        airtableRecords.forEach((rec, idx) => {
+          addSyncLog(`  Record ${idx + 1}: ${JSON.stringify(rec.fields)}`, 'error');
+        });
       }
 
       // Rate limiting - wait 250ms between batches
