@@ -23,7 +23,7 @@ const XANO_CASE_NOTES_ENDPOINT = 'https://xvkq-pq7i-idtl.n7d.xano.io/api:l_gEBOG
 
 // Relevant Airtable tables for schema inspection
 const AIRTABLE_TABLES = {
-  'Client Info': ['Client ID', 'A#', 'First Name', 'Middle Name', 'Family Name', 'Phone Number', 'Client Email', 'Address Line 1', 'Address Line 2', 'City', 'State', 'Zip (5)', 'Country', 'Entry Date', 'Place of Entry', 'DOB', 'clio_contact_id', 'ICH Atty', 'Bahr Client', 'uscis_flatpack_data'],
+  'Client Info': ['Client ID', 'A#', 'First Name', 'Middle Name', 'Family Name', 'Phone Number', 'Client Email', 'Address Line 1', 'Address Line 2', 'City', 'State', 'Zip (5)', 'Country', 'Entry Date', 'Place of Entry', 'DOB', 'clio_contact_id', 'Bahr Client', 'uscis_flatpack_data'],
   'Case Master View': ['Client', 'clio_matter_id', 'PP ID', 'Description', 'File Case Status', 'Case Notes', 'Bahr Client'],
   'Events': ['Case Master', 'A#', 'Hearing Date/Time', 'Event Type', 'Event Hearing Type', 'Court', 'Judge', 'MCH Attny', 'Bahr Client'],
   'Relationships': ['Case Master View', 'Object Client', 'Relationship', 'Bahr Client'],
@@ -944,8 +944,7 @@ function ClioAirtableMerger() {
           }
         });
 
-        // Always include ICH Atty and Bahr Client
-        fields['ICH Atty'] = [ANDREW_BAHR_RECORD_ID];
+        // Always include Bahr Client
         fields['Bahr Client'] = true;
 
         // VERBOSE LOGGING: Log each record's fields
@@ -2670,7 +2669,6 @@ function ClioAirtableMerger() {
         'Place of Entry': record.placeOfEntry,
         'DOB': record.dob,
         'clio_contact_id': record.clioContactId,
-        'ICH Atty': [ANDREW_BAHR_RECORD_ID], // Link field - must be array of record IDs
         'Bahr Client': 'TRUE',
         'uscis_flatpack_data': JSON.stringify(record._flatpackData),
       });
@@ -3871,7 +3869,7 @@ function ClioAirtableMerger() {
                     onClick={() => downloadCSV(
                       phase1Result.clients,
                       'phase1_clients.csv',
-                      ['Client ID', 'A#', 'First Name', 'Middle Name', 'Family Name', 'Phone Number', 'Client Email', 'Address Line 1', 'Address Line 2', 'City', 'State', 'Zip (5)', 'Country', 'Entry Date', 'Place of Entry', 'DOB', 'clio_contact_id', 'ICH Atty', 'Bahr Client', 'uscis_flatpack_data']
+                      ['Client ID', 'A#', 'First Name', 'Middle Name', 'Family Name', 'Phone Number', 'Client Email', 'Address Line 1', 'Address Line 2', 'City', 'State', 'Zip (5)', 'Country', 'Entry Date', 'Place of Entry', 'DOB', 'clio_contact_id', 'Bahr Client', 'uscis_flatpack_data']
                     )}
                   >
                     Download clients.csv ({phase1Result.clients.length} records)
@@ -3885,7 +3883,6 @@ function ClioAirtableMerger() {
                           <th>A#</th>
                           <th>Name</th>
                           <th>clio_contact_id</th>
-                          <th>ICH Atty</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -3895,7 +3892,6 @@ function ClioAirtableMerger() {
                             <td>{row['A#'] || '—'}</td>
                             <td>{row['First Name']} {row['Family Name']}</td>
                             <td style={{ fontFamily: 'monospace', fontSize: '0.7rem' }}>{row['clio_contact_id'] || '—'}</td>
-                            <td style={{ fontFamily: 'monospace', fontSize: '0.7rem' }}>{row['ICH Atty'].slice(0, 10)}...</td>
                           </tr>
                         ))}
                       </tbody>
@@ -3906,7 +3902,7 @@ function ClioAirtableMerger() {
                   <div style={{ marginTop: '1.5rem', padding: '1rem', background: 'rgba(99, 102, 241, 0.1)', borderRadius: '8px', border: '1px solid rgba(99, 102, 241, 0.3)' }}>
                     <h4 style={{ color: '#a5b4fc', marginBottom: '1rem' }}>API Upload to Airtable</h4>
                     <p style={{ fontSize: '0.8rem', color: '#71717a', marginBottom: '1rem' }}>
-                      Upload directly to Client Info table with duplicate checking. ICH Atty: <code style={{ background: '#1e293b', padding: '2px 6px', borderRadius: '4px' }}>{ANDREW_BAHR_RECORD_ID}</code>
+                      Upload directly to Client Info table with duplicate checking.
                     </p>
 
                     {/* API Config */}
@@ -4026,7 +4022,7 @@ function ClioAirtableMerger() {
                             ))}
                           </div>
                           <div style={{ marginTop: '0.75rem', fontSize: '0.7rem', color: '#64748b' }}>
-                            Note: ICH Atty (link) and Bahr Client (checkbox) are always included automatically.
+                            Note: Bahr Client (checkbox) is always included automatically.
                           </div>
                         </div>
                       )}
