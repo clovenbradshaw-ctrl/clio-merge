@@ -736,8 +736,8 @@ function ClioAirtableMerger() {
   });
 
   // Field mapping configuration - source field to Airtable field
+  // Note: 'Client ID' is excluded because it's a computed/formula field in Airtable
   const [fieldMapping, setFieldMapping] = useState({
-    'Client ID': { airtable: 'Client ID', enabled: true },
     'A#': { airtable: 'A#', enabled: true },
     'First Name': { airtable: 'First Name', enabled: true },
     'Middle Name': { airtable: 'Middle Name', enabled: true },
