@@ -2909,7 +2909,7 @@ function ClioAirtableMerger() {
 
     // Get enabled output field mappings
     const enabledFields = Object.entries(phase2FieldMapping.outputFields)
-      .filter(([_, config]) => config.enabled)
+      .filter(([, config]) => config.enabled)
       .reduce((acc, [key, config]) => {
         acc[key] = config;
         return acc;
@@ -4767,8 +4767,8 @@ function ClioAirtableMerger() {
                     onClick={() => {
                       // Build dynamic headers from enabled field mappings
                       const headers = Object.entries(phase2FieldMapping.outputFields)
-                        .filter(([_, config]) => config.enabled)
-                        .map(([_, config]) => config.outputName);
+                        .filter(([, config]) => config.enabled)
+                        .map(([, config]) => config.outputName);
                       // Add internal fields if enabled
                       if (phase2FieldMapping.includeInternalFields) {
                         headers.push('_client_name', '_note_count');
@@ -4784,7 +4784,7 @@ function ClioAirtableMerger() {
                       <thead>
                         <tr>
                           {Object.entries(phase2FieldMapping.outputFields)
-                            .filter(([_, config]) => config.enabled)
+                            .filter(([, config]) => config.enabled)
                             .slice(0, 4)
                             .map(([key, config]) => (
                               <th key={key}>{config.outputName}</th>
@@ -4795,7 +4795,7 @@ function ClioAirtableMerger() {
                       <tbody>
                         {phase2Result.caseMaster.slice(0, 5).map((row, i) => {
                           const enabledFields = Object.entries(phase2FieldMapping.outputFields)
-                            .filter(([_, config]) => config.enabled)
+                            .filter(([, config]) => config.enabled)
                             .slice(0, 4);
                           return (
                             <tr key={i}>
