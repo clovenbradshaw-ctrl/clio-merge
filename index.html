@@ -1655,6 +1655,7 @@ function ClioAirtableMerger() {
         'Case Notes': '_aggregated_notes',
         'Bahr Client': '_constant_true',
         'Client': '_client_record_id',
+        'Edit Client Info': '_client_record_id', // Link to Airtable client record
         'Matter_Flatpack': '_matter_flatpack_data',
       };
 
@@ -2932,21 +2933,28 @@ function ClioAirtableMerger() {
     if (phase2Data.airtableClients?.rows) {
       phase2Data.airtableClients.rows.forEach((row) => {
         const recordId = row['Record ID'] || row['recordId'] || row['Airtable Record ID'] || '';
-        const clioContactId = row['clio_contact_id'] || '';
+        const clioContactId = String(row['clio_contact_id'] || '').trim();
         const clientId = row['Client ID'] || row['A#'] || '';
 
         if (clioContactId && recordId) {
           clioContactToRecordId.set(clioContactId, recordId);
         }
         if (clientId && recordId) {
-          clientIdToRecordId.set(clientId, recordId);
+          clientIdToRecordId.set(String(clientId).trim(), recordId);
         }
       });
-      reports.push({ type: 'info', message: `Loaded ${clioContactToRecordId.size} clio_contact_id → Record ID mappings from Airtable` });
+      reports.push({ type: 'info', message: `Loaded ${clioContactToRecordId.size} clio_contact_id → Record ID mappings from Airtable (${phase2Data.airtableClients.rows.length} total rows)` });
       // Show sample mapping for debugging
       if (clioContactToRecordId.size > 0) {
         const sampleEntries = Array.from(clioContactToRecordId.entries()).slice(0, 2);
-        reports.push({ type: 'info', message: `Sample mapping: ${sampleEntries.map(([k, v]) => `${k} → ${v}`).join(', ')}` });
+        reports.push({ type: 'info', message: `Sample Airtable clio_contact_id values: ${sampleEntries.map(([k, v]) => `"${k}" → ${v}`).join(', ')}` });
+      } else {
+        // Show what columns are available in the Airtable export for debugging
+        const sampleRow = phase2Data.airtableClients.rows[0];
+        if (sampleRow) {
+          const columns = Object.keys(sampleRow).join(', ');
+          reports.push({ type: 'warning', message: `No clio_contact_id mappings found. Available columns: ${columns}` });
+        }
       }
     }
 
@@ -2956,7 +2964,7 @@ function ClioAirtableMerger() {
     if (phase2Data.clioMatters?.rows) {
       phase2Data.clioMatters.rows.forEach((row) => {
         const matterId = row['UniqueId'] || '';
-        const clientId = row['ClientId'] || '';
+        const clientId = String(row['ClientId'] || '').trim();
         const displayNumber = row['DisplayNumber'] || '';
         const description = row['Description'] || '';
         const client = row['Client'] || '';
@@ -2982,7 +2990,7 @@ function ClioAirtableMerger() {
       // Show sample ClientId values for comparison with clio_contact_id
       if (mattersLookup.size > 0) {
         const sampleMatters = Array.from(mattersLookup.values()).slice(0, 2);
-        reports.push({ type: 'info', message: `Sample Clio ClientIds: ${sampleMatters.map(m => m.clientId || '(empty)').join(', ')}` });
+        reports.push({ type: 'info', message: `Sample Clio ClientId values: ${sampleMatters.map(m => `"${m.clientId}"` || '(empty)').join(', ')}` });
       }
     }
 
@@ -3013,6 +3021,10 @@ function ClioAirtableMerger() {
     let linkedCount = 0;
     let unlinkedCount = 0;
 
+    // Track sample matches and unmatched for testing UI
+    const sampleMatches = [];
+    const sampleUnmatched = [];
+
     // Get enabled output field mappings
     const enabledFields = Object.entries(phase2FieldMapping.outputFields)
       .filter(([, config]) => config.enabled && config.inputField)
@@ -3027,9 +3039,25 @@ function ClioAirtableMerger() {
 
       if (clientRecordId) {
         linkedCount++;
+        // Capture sample matches (up to 5)
+        if (sampleMatches.length < 5) {
+          sampleMatches.push({
+            displayNumber: matter.displayNumber,
+            clientName: matter.clientName,
+            clioClientId: matter.clientId,
+            airtableRecordId: clientRecordId,
+          });
+        }
       } else {
         unlinkedCount++;
-        reports.push({ type: 'warning', message: `Matter ${matter.displayNumber} - client not found in Airtable export (ClientId: ${matter.clientId})` });
+        // Capture sample unmatched (up to 5)
+        if (sampleUnmatched.length < 5) {
+          sampleUnmatched.push({
+            displayNumber: matter.displayNumber,
+            clientName: matter.clientName,
+            clioClientId: matter.clientId,
+          });
+        }
       }
 
       // Sort notes by date descending and format
@@ -3143,22 +3171,21 @@ function ClioAirtableMerger() {
 
     reports.push({ type: 'info', message: `Generated ${caseMasterOutput.length} Case Master Views (${linkedCount} linked to Airtable clients, ${unlinkedCount} unlinked)` });
 
-    // Show sample client record IDs for debugging
-    if (linkedCount > 0) {
-      const sampleLinked = caseMasterOutput.filter(r => {
-        const linkField = Object.entries(r).find(([k, v]) => Array.isArray(v) && v.length > 0 && v[0]?.startsWith?.('rec'));
-        return linkField;
-      }).slice(0, 3);
-      if (sampleLinked.length > 0) {
-        const sampleIds = sampleLinked.map(r => {
-          const linkField = Object.entries(r).find(([k, v]) => Array.isArray(v) && v.length > 0 && v[0]?.startsWith?.('rec'));
-          return linkField ? linkField[1][0] : null;
-        }).filter(Boolean);
-        reports.push({ type: 'info', message: `Sample Airtable Record IDs: ${sampleIds.join(', ')}` });
-      }
-    }
+    // Build matching stats for test UI
+    const matchingStats = {
+      totalMatters: caseMasterOutput.length,
+      linkedCount,
+      unlinkedCount,
+      airtableClientsLoaded: clioContactToRecordId.size,
+      sampleMatches,
+      sampleUnmatched,
+      // Get sample Airtable clio_contact_ids for comparison
+      sampleAirtableIds: Array.from(clioContactToRecordId.keys()).slice(0, 5),
+      // Get sample Clio ClientIds for comparison
+      sampleClioClientIds: Array.from(mattersLookup.values()).slice(0, 5).map(m => m.clientId),
+    };
 
-    setPhase2Result({ caseMaster: caseMasterOutput });
+    setPhase2Result({ caseMaster: caseMasterOutput, matchingStats });
     setPhase2Report(reports);
   }, [phase2Data, phase2FieldMapping]);
 
@@ -5123,6 +5150,110 @@ function ClioAirtableMerger() {
                     </table>
                   </div>
 
+                  {/* Client Matching Test Section */}
+                  <div style={{ marginTop: '1.5rem', padding: '1rem', background: phase2Result?.matchingStats?.linkedCount > 0 ? 'rgba(34, 197, 94, 0.1)' : 'rgba(239, 68, 68, 0.1)', borderRadius: '8px', border: `1px solid ${phase2Result?.matchingStats?.linkedCount > 0 ? 'rgba(34, 197, 94, 0.3)' : 'rgba(239, 68, 68, 0.3)'}` }}>
+                    <h4 style={{ color: phase2Result?.matchingStats?.linkedCount > 0 ? '#4ade80' : '#f87171', marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                      {phase2Result?.matchingStats?.linkedCount > 0 ? '✓' : '✗'} Client Matching Test
+                      <span style={{ fontSize: '0.75rem', fontWeight: 'normal', color: '#94a3b8' }}>
+                        (Clio ClientId → Airtable clio_contact_id → Record ID)
+                      </span>
+                    </h4>
+
+                    {/* Matching Stats */}
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '0.5rem', marginBottom: '1rem' }}>
+                      <div style={{ background: '#1e293b', padding: '0.75rem', borderRadius: '6px', textAlign: 'center' }}>
+                        <div style={{ fontSize: '1.25rem', fontWeight: 'bold', color: '#818cf8' }}>{phase2Result?.matchingStats?.airtableClientsLoaded || 0}</div>
+                        <div style={{ fontSize: '0.65rem', color: '#71717a' }}>Airtable Clients<br/>(with clio_contact_id)</div>
+                      </div>
+                      <div style={{ background: '#1e293b', padding: '0.75rem', borderRadius: '6px', textAlign: 'center' }}>
+                        <div style={{ fontSize: '1.25rem', fontWeight: 'bold', color: '#6366f1' }}>{phase2Result?.matchingStats?.totalMatters || 0}</div>
+                        <div style={{ fontSize: '0.65rem', color: '#71717a' }}>Clio Matters<br/>(with ClientId)</div>
+                      </div>
+                      <div style={{ background: '#1e293b', padding: '0.75rem', borderRadius: '6px', textAlign: 'center' }}>
+                        <div style={{ fontSize: '1.25rem', fontWeight: 'bold', color: '#22c55e' }}>{phase2Result?.matchingStats?.linkedCount || 0}</div>
+                        <div style={{ fontSize: '0.65rem', color: '#71717a' }}>Matched<br/>(will link)</div>
+                      </div>
+                      <div style={{ background: '#1e293b', padding: '0.75rem', borderRadius: '6px', textAlign: 'center' }}>
+                        <div style={{ fontSize: '1.25rem', fontWeight: 'bold', color: '#f59e0b' }}>{phase2Result?.matchingStats?.unlinkedCount || 0}</div>
+                        <div style={{ fontSize: '0.65rem', color: '#71717a' }}>Unmatched<br/>(no link)</div>
+                      </div>
+                    </div>
+
+                    {/* Sample ID Comparison */}
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', marginBottom: '1rem' }}>
+                      <div style={{ background: '#1e293b', padding: '0.75rem', borderRadius: '6px' }}>
+                        <div style={{ fontSize: '0.7rem', color: '#a5b4fc', marginBottom: '0.5rem', fontWeight: 'bold' }}>Sample Airtable clio_contact_id values:</div>
+                        <div style={{ fontFamily: 'monospace', fontSize: '0.7rem', color: '#94a3b8' }}>
+                          {phase2Result?.matchingStats?.sampleAirtableIds?.length > 0
+                            ? phase2Result.matchingStats.sampleAirtableIds.map((id, i) => <div key={i}>"{id}"</div>)
+                            : <span style={{ color: '#f87171' }}>No clio_contact_id values found in Airtable export</span>
+                          }
+                        </div>
+                      </div>
+                      <div style={{ background: '#1e293b', padding: '0.75rem', borderRadius: '6px' }}>
+                        <div style={{ fontSize: '0.7rem', color: '#a5b4fc', marginBottom: '0.5rem', fontWeight: 'bold' }}>Sample Clio Matter ClientId values:</div>
+                        <div style={{ fontFamily: 'monospace', fontSize: '0.7rem', color: '#94a3b8' }}>
+                          {phase2Result?.matchingStats?.sampleClioClientIds?.length > 0
+                            ? phase2Result.matchingStats.sampleClioClientIds.map((id, i) => <div key={i}>"{id}"</div>)
+                            : <span style={{ color: '#f87171' }}>No ClientId values found in Clio export</span>
+                          }
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Sample Matches */}
+                    {phase2Result?.matchingStats?.sampleMatches?.length > 0 && (
+                      <div style={{ background: 'rgba(34, 197, 94, 0.1)', padding: '0.75rem', borderRadius: '6px', marginBottom: '0.75rem' }}>
+                        <div style={{ fontSize: '0.7rem', color: '#4ade80', marginBottom: '0.5rem', fontWeight: 'bold' }}>✓ Sample Successful Matches:</div>
+                        <table style={{ width: '100%', fontSize: '0.7rem', borderCollapse: 'collapse' }}>
+                          <thead>
+                            <tr style={{ borderBottom: '1px solid #374151' }}>
+                              <th style={{ textAlign: 'left', padding: '0.25rem', color: '#94a3b8' }}>Matter</th>
+                              <th style={{ textAlign: 'left', padding: '0.25rem', color: '#94a3b8' }}>Client</th>
+                              <th style={{ textAlign: 'left', padding: '0.25rem', color: '#94a3b8' }}>Clio ClientId</th>
+                              <th style={{ textAlign: 'left', padding: '0.25rem', color: '#94a3b8' }}>→ Airtable Record ID</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {phase2Result.matchingStats.sampleMatches.map((match, i) => (
+                              <tr key={i} style={{ borderBottom: '1px solid #1e293b' }}>
+                                <td style={{ padding: '0.25rem', color: '#e2e8f0' }}>{match.displayNumber}</td>
+                                <td style={{ padding: '0.25rem', color: '#94a3b8' }}>{match.clientName?.slice(0, 20)}</td>
+                                <td style={{ padding: '0.25rem', fontFamily: 'monospace', color: '#818cf8' }}>{match.clioClientId}</td>
+                                <td style={{ padding: '0.25rem', fontFamily: 'monospace', color: '#4ade80' }}>{match.airtableRecordId}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+
+                    {/* Sample Unmatched */}
+                    {phase2Result?.matchingStats?.sampleUnmatched?.length > 0 && (
+                      <div style={{ background: 'rgba(251, 191, 36, 0.1)', padding: '0.75rem', borderRadius: '6px' }}>
+                        <div style={{ fontSize: '0.7rem', color: '#fbbf24', marginBottom: '0.5rem', fontWeight: 'bold' }}>✗ Sample Unmatched (ClientId not found in Airtable):</div>
+                        <table style={{ width: '100%', fontSize: '0.7rem', borderCollapse: 'collapse' }}>
+                          <thead>
+                            <tr style={{ borderBottom: '1px solid #374151' }}>
+                              <th style={{ textAlign: 'left', padding: '0.25rem', color: '#94a3b8' }}>Matter</th>
+                              <th style={{ textAlign: 'left', padding: '0.25rem', color: '#94a3b8' }}>Client</th>
+                              <th style={{ textAlign: 'left', padding: '0.25rem', color: '#94a3b8' }}>Clio ClientId (not in Airtable)</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {phase2Result.matchingStats.sampleUnmatched.map((unmatched, i) => (
+                              <tr key={i} style={{ borderBottom: '1px solid #1e293b' }}>
+                                <td style={{ padding: '0.25rem', color: '#e2e8f0' }}>{unmatched.displayNumber}</td>
+                                <td style={{ padding: '0.25rem', color: '#94a3b8' }}>{unmatched.clientName?.slice(0, 20)}</td>
+                                <td style={{ padding: '0.25rem', fontFamily: 'monospace', color: '#f59e0b' }}>{unmatched.clioClientId || '(empty)'}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </div>
+
                   {/* Direct Upload to Airtable Section */}
                   <div style={{ marginTop: '1.5rem', padding: '1rem', background: 'rgba(99, 102, 241, 0.1)', borderRadius: '8px', border: '1px solid rgba(99, 102, 241, 0.3)' }}>
                     <h4 style={{ color: '#a5b4fc', marginBottom: '1rem' }}>Direct Upload to Airtable</h4>
@@ -5133,15 +5264,15 @@ function ClioAirtableMerger() {
                     {/* Stats Row */}
                     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '0.5rem', marginBottom: '1rem' }}>
                       <div style={{ background: '#1e293b', padding: '0.75rem', borderRadius: '6px', textAlign: 'center' }}>
-                        <div style={{ fontSize: '1.5rem', fontWeight: 'bold', color: '#6366f1' }}>{phase2Result?.caseMaster?.length || 0}</div>
+                        <div style={{ fontSize: '1.5rem', fontWeight: 'bold', color: '#6366f1' }}>{phase2Result?.matchingStats?.totalMatters || 0}</div>
                         <div style={{ fontSize: '0.7rem', color: '#71717a' }}>Total Records</div>
                       </div>
                       <div style={{ background: '#1e293b', padding: '0.75rem', borderRadius: '6px', textAlign: 'center' }}>
-                        <div style={{ fontSize: '1.5rem', fontWeight: 'bold', color: '#22c55e' }}>{phase2Result?.caseMaster?.filter(r => r['Client']?.length > 0).length || 0}</div>
+                        <div style={{ fontSize: '1.5rem', fontWeight: 'bold', color: '#22c55e' }}>{phase2Result?.matchingStats?.linkedCount || 0}</div>
                         <div style={{ fontSize: '0.7rem', color: '#71717a' }}>With Client Link</div>
                       </div>
                       <div style={{ background: '#1e293b', padding: '0.75rem', borderRadius: '6px', textAlign: 'center' }}>
-                        <div style={{ fontSize: '1.5rem', fontWeight: 'bold', color: '#f59e0b' }}>{phase2Result?.caseMaster?.filter(r => !r['Client'] || r['Client'].length === 0).length || 0}</div>
+                        <div style={{ fontSize: '1.5rem', fontWeight: 'bold', color: '#f59e0b' }}>{phase2Result?.matchingStats?.unlinkedCount || 0}</div>
                         <div style={{ fontSize: '0.7rem', color: '#71717a' }}>Without Link</div>
                       </div>
                     </div>
