@@ -180,7 +180,7 @@ const AIRTABLE_CONFIG = {
       name: 'Client Info',
       uniqueFields: ['A#', 'clio_contact_id', 'Client ID'],
       fields: {
-        'Client ID': { type: 'text', required: false },
+        // Note: 'Client ID' is a computed field in Airtable - do not include here
         'A#': { type: 'text', required: false, normalize: 'normalizeANumber' },
         'First Name': { type: 'text', required: true },
         'Middle Name': { type: 'text', required: false },
