@@ -2952,7 +2952,11 @@ function ClioAirtableMerger() {
             outputRecord[outputName] = clientRecordId ? [clientRecordId] : [];
             break;
           case '_aggregated_notes':
-            outputRecord[outputName] = formattedNotes;
+            // Prepend description at the top of notes if it exists
+            const descriptionHeader = matter.description
+              ? `${'═'.repeat(55)}\nDESCRIPTION\n${'─'.repeat(50)}\n${matter.description}\n\n`
+              : '';
+            outputRecord[outputName] = descriptionHeader + formattedNotes;
             break;
           case '_constant_true':
             outputRecord[outputName] = 'TRUE';
