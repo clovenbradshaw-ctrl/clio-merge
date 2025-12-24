@@ -684,6 +684,12 @@ function ClioAirtableMerger() {
   const [phase2Data, setPhase2Data] = useState({ airtableClients: null, clioMatters: null, clioNotes: null });
   const [phase2Result, setPhase2Result] = useState(null);
   const [phase2Report, setPhase2Report] = useState([]);
+  const [phase2Sync, setPhase2Sync] = useState({
+    loading: false,
+    fetchedClients: [],
+    logs: [],
+    progress: { current: 0, total: 0, phase: '' }
+  });
 
   // Phase 3 state
   const [phase3Files, setPhase3Files] = useState({
@@ -2175,6 +2181,83 @@ function ClioAirtableMerger() {
     setPhase1Report(reports);
   }, [phase1Data, combinedMergedClients]);
 
+  // Phase 2 Airtable fetch helpers
+  const addPhase2Log = (message, type = 'info') => {
+    setPhase2Sync(prev => ({
+      ...prev,
+      logs: [...prev.logs, { message, type, time: new Date().toLocaleTimeString() }]
+    }));
+  };
+
+  // Fetch Client Info records from Airtable for Phase 2
+  const fetchPhase2Clients = async () => {
+    if (!airtableApiKey || !devToolsBaseId) {
+      addPhase2Log('Please enter API key and Base ID in Phase 1 first', 'error');
+      return;
+    }
+
+    setPhase2Sync(prev => ({ ...prev, loading: true, logs: [] }));
+    addPhase2Log('Fetching Client Info records from Airtable...', 'info');
+
+    try {
+      const allRecords = [];
+      let offset = null;
+
+      do {
+        const url = offset
+          ? `https://api.airtable.com/v0/${devToolsBaseId}/Client%20Info?offset=${offset}`
+          : `https://api.airtable.com/v0/${devToolsBaseId}/Client%20Info`;
+
+        const response = await fetch(url, {
+          headers: { 'Authorization': `Bearer ${airtableApiKey}` }
+        });
+
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const data = await response.json();
+        allRecords.push(...data.records);
+        offset = data.offset;
+
+        setPhase2Sync(prev => ({
+          ...prev,
+          progress: { current: allRecords.length, total: allRecords.length, phase: 'Fetching...' }
+        }));
+        addPhase2Log(`Fetched ${allRecords.length} records...`, 'info');
+      } while (offset);
+
+      // Convert to the format expected by runPhase2 (matching CSV structure)
+      const rows = allRecords.map(rec => ({
+        'Record ID': rec.id,
+        'clio_contact_id': rec.fields['clio_contact_id'] || '',
+        'Client ID': rec.fields['Client ID'] || '',
+        'A#': rec.fields['A#'] || '',
+        'First Name': rec.fields['First Name'] || '',
+        'Family Name': rec.fields['Family Name'] || '',
+      }));
+
+      // Update phase2Data with fetched records
+      setPhase2Data(prev => ({
+        ...prev,
+        airtableClients: { rows, headers: ['Record ID', 'clio_contact_id', 'Client ID', 'A#', 'First Name', 'Family Name'] }
+      }));
+
+      setPhase2Sync(prev => ({
+        ...prev,
+        loading: false,
+        fetchedClients: allRecords,
+        progress: { current: allRecords.length, total: allRecords.length, phase: 'Complete' }
+      }));
+
+      // Stats
+      const withClio = allRecords.filter(r => r.fields['clio_contact_id']).length;
+      const withANum = allRecords.filter(r => r.fields['A#']).length;
+      addPhase2Log(`Total: ${allRecords.length} clients fetched from Airtable`, 'success');
+      addPhase2Log(`  ${withClio} with clio_contact_id, ${withANum} with A#`, 'info');
+    } catch (err) {
+      addPhase2Log(`Error: ${err.message}`, 'error');
+      setPhase2Sync(prev => ({ ...prev, loading: false }));
+    }
+  };
+
   // Phase 2: Case Master Views
   const runPhase2 = useCallback(() => {
     const reports = [];
@@ -3360,8 +3443,90 @@ function ClioAirtableMerger() {
               </p>
 
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '1rem', marginBottom: '1.5rem' }}>
+                {/* Airtable Client Fetch - Special handling */}
+                <div>
+                  <h4 style={{ fontSize: '0.875rem', marginBottom: '0.5rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                    Airtable Clients
+                    <span className="badge badge-warning">Required</span>
+                  </h4>
+                  <p style={{ fontSize: '0.75rem', color: '#71717a', marginBottom: '0.5rem' }}>Fetch directly from Airtable</p>
+
+                  <div style={{
+                    border: phase2Data.airtableClients?.rows?.length ? '2px solid #22c55e' : '2px dashed #3f3f46',
+                    borderRadius: '8px',
+                    padding: '1rem',
+                    background: phase2Data.airtableClients?.rows?.length ? 'rgba(34, 197, 94, 0.1)' : 'transparent',
+                    minHeight: '80px',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    justifyContent: 'center',
+                    alignItems: 'center',
+                    gap: '0.5rem'
+                  }}>
+                    {phase2Data.airtableClients?.rows?.length ? (
+                      <div style={{ textAlign: 'center' }}>
+                        <span style={{ color: '#22c55e', fontSize: '1.25rem' }}>✓</span>
+                        <div style={{ color: '#22c55e', fontWeight: 600 }}>{phase2Data.airtableClients.rows.length} clients</div>
+                        <div style={{ fontSize: '0.7rem', color: '#71717a' }}>from Airtable</div>
+                        <button
+                          onClick={fetchPhase2Clients}
+                          disabled={phase2Sync.loading}
+                          style={{
+                            marginTop: '0.5rem',
+                            padding: '0.25rem 0.5rem',
+                            background: 'transparent',
+                            color: '#94a3b8',
+                            border: '1px solid #475569',
+                            borderRadius: '4px',
+                            cursor: 'pointer',
+                            fontSize: '0.7rem'
+                          }}
+                        >
+                          {phase2Sync.loading ? 'Refreshing...' : 'Refresh'}
+                        </button>
+                      </div>
+                    ) : (
+                      <button
+                        onClick={fetchPhase2Clients}
+                        disabled={phase2Sync.loading || !airtableApiKey || !devToolsBaseId}
+                        style={{
+                          padding: '0.5rem 1rem',
+                          background: !airtableApiKey || !devToolsBaseId ? '#374151' : '#6366f1',
+                          color: 'white',
+                          border: 'none',
+                          borderRadius: '6px',
+                          cursor: !airtableApiKey || !devToolsBaseId ? 'not-allowed' : 'pointer',
+                          fontSize: '0.8rem',
+                          opacity: !airtableApiKey || !devToolsBaseId ? 0.6 : 1
+                        }}
+                      >
+                        {phase2Sync.loading ? 'Fetching...' : 'Fetch from Airtable'}
+                      </button>
+                    )}
+                    {!airtableApiKey || !devToolsBaseId ? (
+                      <div style={{ fontSize: '0.7rem', color: '#f59e0b', textAlign: 'center' }}>
+                        Enter API key in Phase 1 first
+                      </div>
+                    ) : null}
+                  </div>
+
+                  {/* Progress bar */}
+                  {phase2Sync.loading && (
+                    <div style={{ marginTop: '0.5rem' }}>
+                      <div style={{ background: '#1e293b', borderRadius: '4px', height: '4px', overflow: 'hidden' }}>
+                        <div style={{
+                          height: '100%',
+                          background: 'linear-gradient(90deg, #6366f1, #a855f7)',
+                          width: '100%',
+                          animation: 'pulse 1.5s ease-in-out infinite'
+                        }} />
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* Clio Matters and Notes - CSV uploads */}
                 {[
-                  { key: 'airtableClients', label: 'Airtable Client Export', desc: 'Must include Record ID and clio_contact_id', required: true },
                   { key: 'clioMatters', label: 'Clio Matters Export', desc: 'UniqueId, ClientId, DisplayNumber', required: true },
                   { key: 'clioNotes', label: 'Clio Matter Notes', desc: 'MatterId, Subject, Detail, Date', required: false },
                 ].map(({ key, label, desc, required }) => (
@@ -3384,6 +3549,28 @@ function ClioAirtableMerger() {
                     </label>
                   </div>
                 ))}
+              </div>
+
+              {/* Phase 2 Logs */}
+              {phase2Sync.logs.length > 0 && (
+                <div style={{ marginBottom: '1rem', background: '#0f172a', borderRadius: '6px', padding: '0.75rem', maxHeight: '100px', overflowY: 'auto', fontSize: '0.75rem', fontFamily: 'monospace' }}>
+                  {phase2Sync.logs.map((log, i) => (
+                    <div key={i} style={{ color: log.type === 'error' ? '#ef4444' : log.type === 'success' ? '#10b981' : '#94a3b8', marginBottom: '0.25rem' }}>
+                      <span style={{ color: '#475569' }}>[{log.time}]</span> {log.message}
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {/* How it works explanation */}
+              <div style={{ marginBottom: '1.5rem', padding: '1rem', background: 'rgba(99, 102, 241, 0.1)', borderRadius: '8px', border: '1px solid rgba(99, 102, 241, 0.3)' }}>
+                <h4 style={{ color: '#a5b4fc', marginBottom: '0.75rem', fontSize: '0.875rem' }}>How Case Matters are Created</h4>
+                <ol style={{ fontSize: '0.8rem', color: '#94a3b8', paddingLeft: '1.25rem', lineHeight: '1.6' }}>
+                  <li><strong style={{ color: '#e2e8f0' }}>Client Linking:</strong> Each Clio matter has a ClientId that maps to clio_contact_id in Airtable. The system finds the matching Airtable Record ID to create the link.</li>
+                  <li><strong style={{ color: '#e2e8f0' }}>Note Aggregation:</strong> All notes for a matter are combined chronologically, formatted with timestamps and creators for easy reading.</li>
+                  <li><strong style={{ color: '#e2e8f0' }}>Status Mapping:</strong> Clio "Open" status becomes "Active", preserving other statuses as-is.</li>
+                  <li><strong style={{ color: '#e2e8f0' }}>Validation:</strong> Matters without matching clients are flagged in the report but still included (without the Client link).</li>
+                </ol>
               </div>
 
               <button
@@ -3952,10 +4139,10 @@ function ClioAirtableMerger() {
             <div>
               <div style={{ color: '#a855f7', fontWeight: 600, marginBottom: '0.5rem' }}>Phase 2</div>
               <ol style={{ paddingLeft: '1.25rem', color: '#a1a1aa' }}>
-                <li>Upload Airtable export + Clio Matters/Notes</li>
+                <li>Fetch Clients from Airtable</li>
+                <li>Upload Clio Matters/Notes</li>
                 <li>Download case_master_views.csv</li>
                 <li>Import to Airtable</li>
-                <li>Export with Record IDs</li>
               </ol>
             </div>
             <div>
