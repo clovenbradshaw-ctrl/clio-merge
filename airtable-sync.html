@@ -169,9 +169,6 @@ const { useState, useCallback, useEffect, useRef } = React;
 // CONFIGURATION
 // ============================================
 
-// ICH Attorney Record ID (Andrew Bahr)
-const ICH_ATTY_RECORD_ID = 'recRaQ8cur6na6kIw';
-
 // Airtable Base Configuration
 const AIRTABLE_CONFIG = {
   baseId: '', // Will be set from UI
@@ -197,7 +194,6 @@ const AIRTABLE_CONFIG = {
         'Place of Entry': { type: 'text', required: false },
         'DOB': { type: 'date', required: false, normalize: 'normalizeDate' },
         'clio_contact_id': { type: 'text', required: false },
-        'ICH Atty': { type: 'link', required: false, defaultValue: ICH_ATTY_RECORD_ID },
         'Bahr Client': { type: 'checkbox', required: false, defaultValue: true },
         'uscis_flatpack_data': { type: 'longtext', required: false },
       }
@@ -694,9 +690,8 @@ function AirtableSync() {
       }
     });
 
-    // Always set ICH Atty for Client Info table
+    // Always set Bahr Client for Client Info table
     if (activeTable === 'clientInfo') {
-      record['ICH Atty'] = [ICH_ATTY_RECORD_ID];
       record['Bahr Client'] = true;
     }
 
@@ -982,7 +977,7 @@ function AirtableSync() {
     <div className="container">
       <h1>Airtable Sync - Data Mapping & Deduplication</h1>
       <p className="subtitle">
-        Carefully map and sync data to Airtable with duplicate checking. ICH Atty: {ICH_ATTY_RECORD_ID}
+        Carefully map and sync data to Airtable with duplicate checking.
       </p>
 
       {/* Configuration Card */}
@@ -1193,15 +1188,6 @@ function AirtableSync() {
             </table>
           </div>
 
-          <div style={{ marginTop: '20px', padding: '15px', background: '#1e293b', borderRadius: '8px' }}>
-            <h4 style={{ color: '#a5b4fc', marginBottom: '10px' }}>ICH Attorney Configuration</h4>
-            <p style={{ color: '#94a3b8' }}>
-              All Client Info records will automatically have ICH Atty set to:
-            </p>
-            <code style={{ display: 'block', marginTop: '10px', padding: '10px', background: '#0f172a', borderRadius: '4px' }}>
-              {ICH_ATTY_RECORD_ID}
-            </code>
-          </div>
         </div>
       )}
 
