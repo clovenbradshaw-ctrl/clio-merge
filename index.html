@@ -2932,21 +2932,28 @@ function ClioAirtableMerger() {
     if (phase2Data.airtableClients?.rows) {
       phase2Data.airtableClients.rows.forEach((row) => {
         const recordId = row['Record ID'] || row['recordId'] || row['Airtable Record ID'] || '';
-        const clioContactId = row['clio_contact_id'] || '';
+        const clioContactId = String(row['clio_contact_id'] || '').trim();
         const clientId = row['Client ID'] || row['A#'] || '';
 
         if (clioContactId && recordId) {
           clioContactToRecordId.set(clioContactId, recordId);
         }
         if (clientId && recordId) {
-          clientIdToRecordId.set(clientId, recordId);
+          clientIdToRecordId.set(String(clientId).trim(), recordId);
         }
       });
-      reports.push({ type: 'info', message: `Loaded ${clioContactToRecordId.size} clio_contact_id → Record ID mappings from Airtable` });
+      reports.push({ type: 'info', message: `Loaded ${clioContactToRecordId.size} clio_contact_id → Record ID mappings from Airtable (${phase2Data.airtableClients.rows.length} total rows)` });
       // Show sample mapping for debugging
       if (clioContactToRecordId.size > 0) {
         const sampleEntries = Array.from(clioContactToRecordId.entries()).slice(0, 2);
-        reports.push({ type: 'info', message: `Sample mapping: ${sampleEntries.map(([k, v]) => `${k} → ${v}`).join(', ')}` });
+        reports.push({ type: 'info', message: `Sample Airtable clio_contact_id values: ${sampleEntries.map(([k, v]) => `"${k}" → ${v}`).join(', ')}` });
+      } else {
+        // Show what columns are available in the Airtable export for debugging
+        const sampleRow = phase2Data.airtableClients.rows[0];
+        if (sampleRow) {
+          const columns = Object.keys(sampleRow).join(', ');
+          reports.push({ type: 'warning', message: `No clio_contact_id mappings found. Available columns: ${columns}` });
+        }
       }
     }
 
@@ -2956,7 +2963,7 @@ function ClioAirtableMerger() {
     if (phase2Data.clioMatters?.rows) {
       phase2Data.clioMatters.rows.forEach((row) => {
         const matterId = row['UniqueId'] || '';
-        const clientId = row['ClientId'] || '';
+        const clientId = String(row['ClientId'] || '').trim();
         const displayNumber = row['DisplayNumber'] || '';
         const description = row['Description'] || '';
         const client = row['Client'] || '';
@@ -2982,7 +2989,7 @@ function ClioAirtableMerger() {
       // Show sample ClientId values for comparison with clio_contact_id
       if (mattersLookup.size > 0) {
         const sampleMatters = Array.from(mattersLookup.values()).slice(0, 2);
-        reports.push({ type: 'info', message: `Sample Clio ClientIds: ${sampleMatters.map(m => m.clientId || '(empty)').join(', ')}` });
+        reports.push({ type: 'info', message: `Sample Clio ClientId values: ${sampleMatters.map(m => `"${m.clientId}"` || '(empty)').join(', ')}` });
       }
     }
 
