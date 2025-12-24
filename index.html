@@ -2942,7 +2942,12 @@ function ClioAirtableMerger() {
           clientIdToRecordId.set(clientId, recordId);
         }
       });
-      reports.push({ type: 'info', message: `Loaded ${clioContactToRecordId.size} clio_contact_id mappings from Airtable export` });
+      reports.push({ type: 'info', message: `Loaded ${clioContactToRecordId.size} clio_contact_id → Record ID mappings from Airtable` });
+      // Show sample mapping for debugging
+      if (clioContactToRecordId.size > 0) {
+        const sampleEntries = Array.from(clioContactToRecordId.entries()).slice(0, 2);
+        reports.push({ type: 'info', message: `Sample mapping: ${sampleEntries.map(([k, v]) => `${k} → ${v}`).join(', ')}` });
+      }
     }
 
     // Build MatterId -> Matter info lookup from Clio Matters
@@ -2974,6 +2979,11 @@ function ClioAirtableMerger() {
         }
       });
       reports.push({ type: 'info', message: `Loaded ${mattersLookup.size} matters from Clio Matters` });
+      // Show sample ClientId values for comparison with clio_contact_id
+      if (mattersLookup.size > 0) {
+        const sampleMatters = Array.from(mattersLookup.values()).slice(0, 2);
+        reports.push({ type: 'info', message: `Sample Clio ClientIds: ${sampleMatters.map(m => m.clientId || '(empty)').join(', ')}` });
+      }
     }
 
     // Aggregate notes by MatterId
@@ -3131,7 +3141,22 @@ function ClioAirtableMerger() {
       caseMasterOutput.push(outputRecord);
     });
 
-    reports.push({ type: 'info', message: `Generated ${caseMasterOutput.length} Case Master Views (${linkedCount} linked, ${unlinkedCount} unlinked)` });
+    reports.push({ type: 'info', message: `Generated ${caseMasterOutput.length} Case Master Views (${linkedCount} linked to Airtable clients, ${unlinkedCount} unlinked)` });
+
+    // Show sample client record IDs for debugging
+    if (linkedCount > 0) {
+      const sampleLinked = caseMasterOutput.filter(r => {
+        const linkField = Object.entries(r).find(([k, v]) => Array.isArray(v) && v.length > 0 && v[0]?.startsWith?.('rec'));
+        return linkField;
+      }).slice(0, 3);
+      if (sampleLinked.length > 0) {
+        const sampleIds = sampleLinked.map(r => {
+          const linkField = Object.entries(r).find(([k, v]) => Array.isArray(v) && v.length > 0 && v[0]?.startsWith?.('rec'));
+          return linkField ? linkField[1][0] : null;
+        }).filter(Boolean);
+        reports.push({ type: 'info', message: `Sample Airtable Record IDs: ${sampleIds.join(', ')}` });
+      }
+    }
 
     setPhase2Result({ caseMaster: caseMasterOutput });
     setPhase2Report(reports);
@@ -3173,6 +3198,14 @@ function ClioAirtableMerger() {
     // Get list of valid field IDs from schema
     const validFieldIds = new Set(caseMasterSchema.fields.map(f => f.id));
 
+    // Debug: Count records with valid client links
+    const clientLinkFieldId = Object.entries(phase2FieldMapping.outputFields)
+      .find(([, config]) => config.inputField === '_client_record_id' && config.enabled)?.[0];
+    if (clientLinkFieldId) {
+      const withClientLink = validRecords.filter(r => Array.isArray(r[clientLinkFieldId]) && r[clientLinkFieldId].length > 0 && r[clientLinkFieldId][0]).length;
+      addPhase2Log(`Client links: ${withClientLink}/${validRecords.length} records have valid Airtable Record IDs`, 'info');
+    }
+
     // Process in batches of 10 (Airtable API limit)
     for (let i = 0; i < validRecords.length; i += 10) {
       const batch = validRecords.slice(i, i + 10);
@@ -3200,6 +3233,26 @@ function ClioAirtableMerger() {
           } else if (config.fieldType === 'checkbox') {
             // Checkbox fields: ensure boolean
             fields[key] = Boolean(value);
+          } else if (config.fieldType === 'singleSelect') {
+            // Single select fields: only send if value matches existing option
+            const schemaField = caseMasterSchema.fields.find(f => f.id === key);
+            const validOptions = schemaField?.options?.choices?.map(c => c.name) || [];
+            if (value && validOptions.includes(value)) {
+              fields[key] = value;
+            }
+            // Skip invalid options to avoid API error
+          } else if (config.fieldType === 'multipleSelects') {
+            // Multiple selects: filter to only valid options
+            const schemaField = caseMasterSchema.fields.find(f => f.id === key);
+            const validOptions = schemaField?.options?.choices?.map(c => c.name) || [];
+            if (Array.isArray(value)) {
+              const validValues = value.filter(v => validOptions.includes(v));
+              if (validValues.length > 0) {
+                fields[key] = validValues;
+              }
+            } else if (value && validOptions.includes(value)) {
+              fields[key] = [value];
+            }
           } else if (value !== undefined && value !== null && value !== '') {
             // Other fields: include as-is
             fields[key] = value;
