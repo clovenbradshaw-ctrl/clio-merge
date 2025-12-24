@@ -707,6 +707,21 @@ function ClioAirtableMerger() {
   const [phase3Result, setPhase3Result] = useState(null);
   const [phase3Report, setPhase3Report] = useState([]);
 
+  // Phase 4 state (Case Notes to Xano)
+  const [phase4Files, setPhase4Files] = useState({
+    airtableClients: null,
+    airtableCaseMaster: null,
+    clioNotes: null
+  });
+  const [phase4Data, setPhase4Data] = useState({
+    airtableClients: null,
+    airtableCaseMaster: null,
+    clioNotes: null
+  });
+  const [phase4Result, setPhase4Result] = useState(null);
+  const [phase4Report, setPhase4Report] = useState([]);
+  const [phase4Progress, setPhase4Progress] = useState({ current: 0, total: 0, status: 'idle' });
+
   // Developer Tools state
   const [airtableApiKey, setAirtableApiKey] = useState('');
   const [devToolsBaseId, setDevToolsBaseId] = useState('');
@@ -1145,6 +1160,9 @@ function ClioAirtableMerger() {
       } else if (phase === 3) {
         setPhase3Files(prev => ({ ...prev, [type]: file }));
         setPhase3Data(prev => ({ ...prev, [type]: parsed }));
+      } else if (phase === 4) {
+        setPhase4Files(prev => ({ ...prev, [type]: file }));
+        setPhase4Data(prev => ({ ...prev, [type]: parsed }));
       }
     };
     reader.readAsText(file);
@@ -2543,6 +2561,234 @@ function ClioAirtableMerger() {
     setPhase3Report(reports);
   }, [phase3Data]);
 
+  // Phase 4: Case Notes to Xano
+  const runPhase4 = useCallback(() => {
+    const reports = [];
+
+    // Build clio_contact_id -> client info lookup from Airtable Client Info export
+    const clioContactToClient = new Map();
+
+    if (phase4Data.airtableClients?.rows) {
+      phase4Data.airtableClients.rows.forEach((row) => {
+        const recordId = row['Record ID'] || row['recordId'] || '';
+        const clioContactId = row['clio_contact_id'] || '';
+        const clientId = row['Client ID'] || row['A#'] || '';
+        const firstName = row['First Name'] || '';
+        const lastName = row['Family Name'] || '';
+
+        if (clioContactId) {
+          clioContactToClient.set(clioContactId, {
+            recordId,
+            clientId,
+            clientName: `${firstName} ${lastName}`.trim(),
+          });
+        }
+      });
+      reports.push({ type: 'info', message: `Loaded ${clioContactToClient.size} client mappings from Airtable export` });
+    }
+
+    // Build clio_matter_id -> case master info lookup from Airtable Case Master export
+    const clioMatterToCaseMaster = new Map();
+    const ppIdToCaseMaster = new Map();
+
+    if (phase4Data.airtableCaseMaster?.rows) {
+      phase4Data.airtableCaseMaster.rows.forEach((row) => {
+        const recordId = row['Record ID'] || row['recordId'] || '';
+        const clioMatterId = row['clio_matter_id'] || '';
+        const ppId = row['PP ID'] || '';
+        const description = row['Description'] || '';
+        const clientRecordId = row['Client'] || '';
+
+        const caseMasterInfo = {
+          recordId,
+          ppId,
+          description,
+          clientRecordId,
+        };
+
+        if (clioMatterId) {
+          clioMatterToCaseMaster.set(clioMatterId, caseMasterInfo);
+        }
+        if (ppId) {
+          ppIdToCaseMaster.set(ppId, caseMasterInfo);
+        }
+      });
+      reports.push({ type: 'info', message: `Loaded ${clioMatterToCaseMaster.size} case master mappings from Airtable export` });
+    }
+
+    // Process Clio Notes and create Xano payloads
+    const notesOutput = [];
+    let linkedCount = 0;
+    let unlinkedCount = 0;
+    let missingMatter = 0;
+    let missingClient = 0;
+
+    if (phase4Data.clioNotes?.rows) {
+      phase4Data.clioNotes.rows.forEach((row, index) => {
+        const matterId = row['MatterId'] || row['Matter ID'] || row['UniqueId'] || '';
+        const subject = row['Subject'] || '';
+        const detail = row['Detail'] || row['Description'] || row['Note'] || '';
+        const date = row['Date'] || row['CreatedAt'] || row['Created'] || '';
+        const creator = row['Creator'] || row['CreatedBy'] || row['Author'] || '';
+
+        // Find case master info
+        const caseMaster = clioMatterToCaseMaster.get(matterId);
+        if (!caseMaster) {
+          missingMatter++;
+          reports.push({ type: 'warning', message: `Note ${index + 1}: Matter ${matterId} not found in Case Master export` });
+        }
+
+        // Find client info - from case master or from matter's ClientId field
+        let clientInfo = null;
+        const clientIdFromNote = row['ClientId'] || row['Client ID'] || '';
+
+        if (caseMaster?.clientRecordId) {
+          // Try to find client by their Airtable record ID
+          for (const [clioId, info] of clioContactToClient.entries()) {
+            if (info.recordId === caseMaster.clientRecordId) {
+              clientInfo = info;
+              break;
+            }
+          }
+        }
+
+        if (!clientInfo && clientIdFromNote) {
+          clientInfo = clioContactToClient.get(clientIdFromNote);
+        }
+
+        if (!clientInfo && !caseMaster) {
+          missingClient++;
+        }
+
+        if (caseMaster || clientInfo) {
+          linkedCount++;
+        } else {
+          unlinkedCount++;
+        }
+
+        // Parse date for Xano
+        let dateTimestamp = null;
+        let dateIso = '';
+        if (date) {
+          const parsedDate = new Date(date);
+          if (!isNaN(parsedDate.getTime())) {
+            dateTimestamp = Math.floor(parsedDate.getTime() / 1000);
+            dateIso = parsedDate.toISOString();
+          }
+        }
+
+        // Create Xano payload
+        const notePayload = {
+          Activity: subject || 'Case Note',
+          Type: 'Note',
+          Date: dateTimestamp,
+          Description: detail,
+          Contact: clientInfo?.clientName || '',
+          Client_PP_ID: caseMaster?.ppId || '',
+          Matter: caseMaster?.description || '',
+          RecordId: caseMaster?.recordId || '',
+          Created_By: creator,
+          Softr_Link_to_clients: '',
+          Updated: '',
+          Modified: '',
+          Due_Date: null,
+          Last_Update_By: '',
+          unix_timestamp: dateTimestamp ? String(dateTimestamp) : '',
+          time_raw: dateIso,
+          tags: [],
+          pp_note_id: `clio-${matterId}-${index}`,
+          matter: caseMaster?.description || '',
+          matter_id: matterId,
+          source: 'clio-merge',
+          client_airtable_id: clientInfo?.recordId || caseMaster?.clientRecordId || '',
+          eventId: '',
+          // Additional metadata for preview
+          _subject: subject,
+          _date: date,
+          _creator: creator,
+          _matterId: matterId,
+          _linked: !!(caseMaster || clientInfo),
+        };
+
+        notesOutput.push(notePayload);
+      });
+
+      reports.push({ type: 'info', message: `Processed ${notesOutput.length} notes (${linkedCount} linked, ${unlinkedCount} unlinked)` });
+      if (missingMatter > 0) {
+        reports.push({ type: 'warning', message: `${missingMatter} notes have unmatched Matter IDs` });
+      }
+      if (missingClient > 0) {
+        reports.push({ type: 'warning', message: `${missingClient} notes could not be linked to clients` });
+      }
+    }
+
+    setPhase4Result({ notes: notesOutput, linkedCount, unlinkedCount });
+    setPhase4Report(reports);
+  }, [phase4Data]);
+
+  // POST notes to Xano in batches
+  const postNotesToXano = async () => {
+    if (!phase4Result?.notes?.length) {
+      setPhase4Report(prev => [...prev, { type: 'error', message: 'No notes to post. Run Phase 4 first.' }]);
+      return;
+    }
+
+    const notes = phase4Result.notes;
+    setPhase4Progress({ current: 0, total: notes.length, status: 'posting' });
+    setPhase4Report(prev => [...prev, { type: 'info', message: `Starting to post ${notes.length} notes to Xano...` }]);
+
+    let successCount = 0;
+    let errorCount = 0;
+    const errors = [];
+
+    for (let i = 0; i < notes.length; i++) {
+      const note = notes[i];
+
+      // Remove preview metadata before posting
+      const payload = { ...note };
+      delete payload._subject;
+      delete payload._date;
+      delete payload._creator;
+      delete payload._matterId;
+      delete payload._linked;
+
+      try {
+        const response = await fetch(XANO_CASE_NOTES_ENDPOINT, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(payload),
+        });
+
+        if (!response.ok) {
+          const errorData = await response.json().catch(() => ({}));
+          throw new Error(`HTTP ${response.status}: ${JSON.stringify(errorData)}`);
+        }
+
+        successCount++;
+      } catch (err) {
+        errorCount++;
+        errors.push({ index: i, subject: note._subject || note.Activity, error: err.message });
+      }
+
+      setPhase4Progress({ current: i + 1, total: notes.length, status: 'posting' });
+
+      // Rate limiting: 250ms between requests
+      if (i < notes.length - 1) {
+        await new Promise(resolve => setTimeout(resolve, 250));
+      }
+    }
+
+    setPhase4Progress({ current: notes.length, total: notes.length, status: 'complete' });
+    setPhase4Report(prev => [
+      ...prev,
+      { type: successCount > 0 ? 'info' : 'error', message: `Posted ${successCount} notes successfully, ${errorCount} failed` },
+      ...errors.slice(0, 10).map(e => ({ type: 'error', message: `Note ${e.index + 1} (${e.subject}): ${e.error}` })),
+      ...(errors.length > 10 ? [{ type: 'warning', message: `... and ${errors.length - 10} more errors` }] : []),
+    ]);
+  };
+
   const downloadCSV = (data, filename, headers) => {
     const csv = generateCSV(headers, data);
     const blob = new Blob([csv], { type: 'text/csv' });
@@ -2668,7 +2914,7 @@ function ClioAirtableMerger() {
             Clio → Airtable Merger
           </h1>
           <p style={{ color: '#71717a', fontSize: '0.875rem' }}>
-            3-Phase import: Clients → Case Master Views → Events & Relationships
+            4-Phase import: Clients → Case Master Views → Events & Relationships → Case Notes
           </p>
         </header>
 
@@ -2679,7 +2925,8 @@ function ClioAirtableMerger() {
             { num: 1, label: 'Phase 1: Clients', desc: 'Bahr + Clio Contacts' },
             { num: 2, label: 'Phase 2: Case Master', desc: 'Matters + Notes' },
             { num: 3, label: 'Phase 3: Events & Relationships', desc: 'Events + Related Contacts' },
-            { num: 4, label: 'Dev Tools', desc: 'Schema & Record Lookup' },
+            { num: 4, label: 'Phase 4: Case Notes', desc: 'Notes → Xano' },
+            { num: 5, label: 'Dev Tools', desc: 'Schema & Record Lookup' },
           ].map(({ num, label, desc }) => (
             <div
               key={num}
@@ -3790,8 +4037,216 @@ function ClioAirtableMerger() {
             </div>
           )}
 
-          {/* Dev Tools */}
+          {/* Phase 4: Case Notes to Xano */}
           {activePhase === 4 && (
+            <div>
+              <h2 style={{ marginBottom: '1rem', fontSize: '1.25rem' }}>Phase 4: Case Notes to Xano</h2>
+              <p style={{ color: '#71717a', marginBottom: '1.5rem', fontSize: '0.875rem' }}>
+                Create individual case notes in Xano, linked to clients and Case Master Views.
+              </p>
+
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '1rem', marginBottom: '1.5rem' }}>
+                {/* Airtable Client Info Export */}
+                <div>
+                  <h4 style={{ marginBottom: '0.5rem', fontSize: '0.875rem' }}>
+                    Airtable Client Export <span className="badge badge-warning">Required</span>
+                  </h4>
+                  <p style={{ fontSize: '0.75rem', color: '#71717a', marginBottom: '0.5rem' }}>Record ID + clio_contact_id</p>
+                  <div
+                    className="file-drop"
+                    onClick={() => document.getElementById('phase4-airtable-clients').click()}
+                  >
+                    {phase4Files.airtableClients ? (
+                      <span style={{ color: '#4ade80' }}>{phase4Files.airtableClients.name}</span>
+                    ) : (
+                      'Drop CSV or click'
+                    )}
+                    <input
+                      id="phase4-airtable-clients"
+                      type="file"
+                      accept=".csv"
+                      style={{ display: 'none' }}
+                      onChange={handleFileUpload(4, 'airtableClients')}
+                    />
+                  </div>
+                </div>
+
+                {/* Airtable Case Master Export */}
+                <div>
+                  <h4 style={{ marginBottom: '0.5rem', fontSize: '0.875rem' }}>
+                    Airtable Case Master Export <span className="badge badge-warning">Required</span>
+                  </h4>
+                  <p style={{ fontSize: '0.75rem', color: '#71717a', marginBottom: '0.5rem' }}>Record ID + clio_matter_id + PP ID</p>
+                  <div
+                    className="file-drop"
+                    onClick={() => document.getElementById('phase4-airtable-casemaster').click()}
+                  >
+                    {phase4Files.airtableCaseMaster ? (
+                      <span style={{ color: '#4ade80' }}>{phase4Files.airtableCaseMaster.name}</span>
+                    ) : (
+                      'Drop CSV or click'
+                    )}
+                    <input
+                      id="phase4-airtable-casemaster"
+                      type="file"
+                      accept=".csv"
+                      style={{ display: 'none' }}
+                      onChange={handleFileUpload(4, 'airtableCaseMaster')}
+                    />
+                  </div>
+                </div>
+
+                {/* Clio Notes Export */}
+                <div>
+                  <h4 style={{ marginBottom: '0.5rem', fontSize: '0.875rem' }}>
+                    Clio Notes Export <span className="badge badge-warning">Required</span>
+                  </h4>
+                  <p style={{ fontSize: '0.75rem', color: '#71717a', marginBottom: '0.5rem' }}>MatterId, Subject, Detail, Date, Creator</p>
+                  <div
+                    className="file-drop"
+                    onClick={() => document.getElementById('phase4-clio-notes').click()}
+                  >
+                    {phase4Files.clioNotes ? (
+                      <span style={{ color: '#4ade80' }}>{phase4Files.clioNotes.name}</span>
+                    ) : (
+                      'Drop CSV or click'
+                    )}
+                    <input
+                      id="phase4-clio-notes"
+                      type="file"
+                      accept=".csv"
+                      style={{ display: 'none' }}
+                      onChange={handleFileUpload(4, 'clioNotes')}
+                    />
+                  </div>
+                </div>
+              </div>
+
+              {/* Process Button */}
+              <button
+                className="btn btn-primary"
+                onClick={runPhase4}
+                disabled={!phase4Data.airtableClients || !phase4Data.airtableCaseMaster || !phase4Data.clioNotes}
+                style={{ marginBottom: '1.5rem' }}
+              >
+                Process Notes & Preview
+              </button>
+
+              {/* Report */}
+              {phase4Report.length > 0 && (
+                <div style={{ marginBottom: '1.5rem' }}>
+                  <h4 style={{ marginBottom: '0.5rem' }}>Processing Log</h4>
+                  <div style={{ background: 'rgba(0, 0, 0, 0.3)', padding: '1rem', borderRadius: '8px', maxHeight: '200px', overflowY: 'auto' }}>
+                    {phase4Report.map((r, i) => (
+                      <div key={i} style={{
+                        padding: '0.25rem 0',
+                        fontSize: '0.75rem',
+                        color: r.type === 'error' ? '#f87171' : r.type === 'warning' ? '#fbbf24' : '#4ade80',
+                      }}>
+                        [{r.type.toUpperCase()}] {r.message}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Results */}
+              {phase4Result && (
+                <div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
+                    <h4>
+                      Notes Preview ({phase4Result.notes?.length || 0} notes)
+                      <span style={{ fontSize: '0.75rem', color: '#71717a', marginLeft: '0.5rem' }}>
+                        {phase4Result.linkedCount} linked, {phase4Result.unlinkedCount} unlinked
+                      </span>
+                    </h4>
+                    <button
+                      className="btn btn-primary"
+                      onClick={postNotesToXano}
+                      disabled={phase4Progress.status === 'posting' || !phase4Result.notes?.length}
+                      style={{ background: 'linear-gradient(135deg, #ec4899 0%, #f472b6 100%)' }}
+                    >
+                      {phase4Progress.status === 'posting'
+                        ? `Posting... ${phase4Progress.current}/${phase4Progress.total}`
+                        : 'POST All Notes to Xano'}
+                    </button>
+                  </div>
+
+                  {/* Progress Bar */}
+                  {phase4Progress.status === 'posting' && (
+                    <div style={{ marginBottom: '1rem' }}>
+                      <div style={{ background: 'rgba(0, 0, 0, 0.3)', borderRadius: '4px', height: '8px', overflow: 'hidden' }}>
+                        <div style={{
+                          width: `${(phase4Progress.current / phase4Progress.total) * 100}%`,
+                          height: '100%',
+                          background: 'linear-gradient(90deg, #ec4899, #f472b6)',
+                          transition: 'width 0.2s ease',
+                        }} />
+                      </div>
+                      <p style={{ fontSize: '0.75rem', color: '#a1a1aa', marginTop: '0.25rem' }}>
+                        {phase4Progress.current} of {phase4Progress.total} notes
+                      </p>
+                    </div>
+                  )}
+
+                  {/* Notes Table */}
+                  <div style={{ maxHeight: '400px', overflowY: 'auto', background: 'rgba(0, 0, 0, 0.2)', borderRadius: '8px' }}>
+                    <table style={{ width: '100%', fontSize: '0.75rem', borderCollapse: 'collapse' }}>
+                      <thead style={{ position: 'sticky', top: 0, background: 'rgba(39, 39, 42, 0.95)' }}>
+                        <tr>
+                          <th style={{ padding: '0.5rem', textAlign: 'left', borderBottom: '1px solid rgba(255,255,255,0.1)' }}>#</th>
+                          <th style={{ padding: '0.5rem', textAlign: 'left', borderBottom: '1px solid rgba(255,255,255,0.1)' }}>Subject</th>
+                          <th style={{ padding: '0.5rem', textAlign: 'left', borderBottom: '1px solid rgba(255,255,255,0.1)' }}>PP ID</th>
+                          <th style={{ padding: '0.5rem', textAlign: 'left', borderBottom: '1px solid rgba(255,255,255,0.1)' }}>Client</th>
+                          <th style={{ padding: '0.5rem', textAlign: 'left', borderBottom: '1px solid rgba(255,255,255,0.1)' }}>Date</th>
+                          <th style={{ padding: '0.5rem', textAlign: 'left', borderBottom: '1px solid rgba(255,255,255,0.1)' }}>Creator</th>
+                          <th style={{ padding: '0.5rem', textAlign: 'center', borderBottom: '1px solid rgba(255,255,255,0.1)' }}>Linked</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {phase4Result.notes?.slice(0, 100).map((note, i) => (
+                          <tr key={i} style={{ borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
+                            <td style={{ padding: '0.5rem', color: '#71717a' }}>{i + 1}</td>
+                            <td style={{ padding: '0.5rem', maxWidth: '200px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                              {note._subject || note.Activity}
+                            </td>
+                            <td style={{ padding: '0.5rem', fontFamily: 'monospace', color: '#a5b4fc' }}>{note.Client_PP_ID}</td>
+                            <td style={{ padding: '0.5rem' }}>{note.Contact}</td>
+                            <td style={{ padding: '0.5rem', color: '#71717a' }}>{note._date}</td>
+                            <td style={{ padding: '0.5rem', color: '#71717a' }}>{note._creator}</td>
+                            <td style={{ padding: '0.5rem', textAlign: 'center' }}>
+                              {note._linked
+                                ? <span style={{ color: '#4ade80' }}>✓</span>
+                                : <span style={{ color: '#f87171' }}>✗</span>
+                              }
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                    {phase4Result.notes?.length > 100 && (
+                      <p style={{ padding: '0.5rem', color: '#71717a', fontSize: '0.75rem', textAlign: 'center' }}>
+                        Showing first 100 of {phase4Result.notes.length} notes
+                      </p>
+                    )}
+                  </div>
+
+                  {/* Next Steps */}
+                  <div style={{ marginTop: '1.5rem', padding: '1rem', background: 'rgba(34, 197, 94, 0.1)', borderRadius: '8px', border: '1px solid rgba(34, 197, 94, 0.3)' }}>
+                    <h4 style={{ color: '#4ade80', marginBottom: '0.5rem' }}>Next Steps</h4>
+                    <ol style={{ fontSize: '0.875rem', color: '#a1a1aa', paddingLeft: '1.25rem' }}>
+                      <li>Review the notes preview above</li>
+                      <li>Click "POST All Notes to Xano" to create notes in Xano</li>
+                      <li>Check the processing log for any errors</li>
+                    </ol>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Dev Tools */}
+          {activePhase === 5 && (
             <div>
               <h2 style={{ marginBottom: '1rem', fontSize: '1.25rem' }}>Developer Tools</h2>
               <p style={{ color: '#71717a', marginBottom: '1.5rem', fontSize: '0.875rem' }}>
@@ -4175,7 +4630,7 @@ function ClioAirtableMerger() {
         {/* Instructions */}
         <div className="card" style={{ marginTop: '1.5rem' }}>
           <h3 style={{ marginBottom: '1rem' }}>Import Order</h3>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '1rem', fontSize: '0.875rem' }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '1rem', fontSize: '0.875rem' }}>
             <div>
               <div style={{ color: '#6366f1', fontWeight: 600, marginBottom: '0.5rem' }}>Phase 1</div>
               <ol style={{ paddingLeft: '1.25rem', color: '#a1a1aa' }}>
@@ -4201,6 +4656,15 @@ function ClioAirtableMerger() {
                 <li>Upload Clio Events/Relationships</li>
                 <li>Download events.csv & relationships.csv</li>
                 <li>Import to Airtable</li>
+              </ol>
+            </div>
+            <div>
+              <div style={{ color: '#f472b6', fontWeight: 600, marginBottom: '0.5rem' }}>Phase 4</div>
+              <ol style={{ paddingLeft: '1.25rem', color: '#a1a1aa' }}>
+                <li>Upload both Airtable exports</li>
+                <li>Upload Clio Notes CSV</li>
+                <li>Preview notes & mappings</li>
+                <li>POST notes to Xano</li>
               </ol>
             </div>
           </div>
