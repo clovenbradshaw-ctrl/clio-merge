@@ -2380,7 +2380,7 @@ function ClioAirtableMerger() {
       }).join('\n\n');
 
       caseMasterOutput.push({
-        'Client': clientRecordId, // Airtable link field
+        'Client': clientRecordId ? [clientRecordId] : [], // Airtable link field (must be array)
         'clio_matter_id': matter.matterId,
         'PP ID': matter.displayNumber,
         'Description': matter.description,
@@ -2485,14 +2485,14 @@ function ClioAirtableMerger() {
         const court = location || descParsed.courtAddress || '';
 
         eventsOutput.push({
-          'Case Master': caseMasterRecordId, // Link to Case Master View
+          'Case Master': caseMasterRecordId ? [caseMasterRecordId] : [], // Link to Case Master View (must be array)
           'A#': summaryParsed.aNumber,
           'Hearing Date/Time': startDateTime,
           'Event Type': 'Hearing',
           'Event Hearing Type': mapHearingType(summaryParsed.hearingType),
           'Court': court,
           'Judge': descParsed.judge,
-          'MCH Attny': ANDREW_BAHR_RECORD_ID,
+          'MCH Attny': [ANDREW_BAHR_RECORD_ID], // Link field (must be array)
           'Bahr Client': 'TRUE',
           '_summary': summary.slice(0, 100),
         });
@@ -2545,8 +2545,8 @@ function ClioAirtableMerger() {
         const relationship = relationshipMap[relationshipDesc.toLowerCase()] || relationshipDesc;
 
         relationshipsOutput.push({
-          'Case Master View': caseMasterRecordId,
-          'Object Client': objectClientRecordId,
+          'Case Master View': caseMasterRecordId ? [caseMasterRecordId] : [], // Link field (must be array)
+          'Object Client': objectClientRecordId ? [objectClientRecordId] : [], // Link field (must be array)
           'Relationship': relationship,
           'Bahr Client': 'TRUE',
           '_contact_name': contactName,
