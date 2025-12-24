@@ -3033,6 +3033,16 @@ function ClioAirtableMerger() {
         return acc;
       }, {});
 
+    // Debug: Show which fields are mapped to _client_record_id
+    const clientLinkFields = Object.entries(enabledFields)
+      .filter(([, config]) => config.inputField === '_client_record_id')
+      .map(([, config]) => config.fieldName);
+    if (clientLinkFields.length > 0) {
+      reports.push({ type: 'info', message: `Client link field(s): ${clientLinkFields.join(', ')}` });
+    } else {
+      reports.push({ type: 'warning', message: `No fields mapped to _client_record_id. Re-fetch schema to apply default mappings.` });
+    }
+
     mattersLookup.forEach((matter) => {
       // Find Airtable Record ID for this client
       const clientRecordId = clioContactToRecordId.get(matter.clientId) || '';
@@ -3165,6 +3175,7 @@ function ClioAirtableMerger() {
       outputRecord['_client_name'] = matter.clientName;
       outputRecord['_note_count'] = sortedNotes.length;
       outputRecord['_displayNumber'] = matter.displayNumber;
+      outputRecord['_client_record_id'] = clientRecordId || ''; // Debug: always include for visibility
 
       caseMasterOutput.push(outputRecord);
     });
@@ -5118,30 +5129,22 @@ function ClioAirtableMerger() {
                     <table>
                       <thead>
                         <tr>
-                          {Object.entries(phase2FieldMapping.outputFields)
-                            .filter(([, config]) => config.enabled)
-                            .slice(0, 4)
-                            .map(([key, config]) => (
-                              <th key={key}>{config.fieldName}</th>
-                            ))}
+                          <th>Matter</th>
+                          <th>Client</th>
+                          <th>Airtable Record ID</th>
                           <th>Notes</th>
                         </tr>
                       </thead>
                       <tbody>
-                        {phase2Result.caseMaster.slice(0, 5).map((row, i) => {
-                          const enabledFields = Object.entries(phase2FieldMapping.outputFields)
-                            .filter(([, config]) => config.enabled)
-                            .slice(0, 4);
+                        {phase2Result.caseMaster.slice(0, 10).map((row, i) => {
+                          const recordId = row['_client_record_id'];
                           return (
                             <tr key={i}>
-                              {enabledFields.map(([key, config]) => {
-                                const value = row[config.fieldName];
-                                // Format display based on field type
-                                if (config.inputField === '_client_record_id') {
-                                  return <td key={key} style={{ fontFamily: 'monospace', fontSize: '0.7rem' }}>{value?.length ? '...' : '—'}</td>;
-                                }
-                                return <td key={key}>{typeof value === 'string' ? value?.slice(0, 30) : value}</td>;
-                              })}
+                              <td style={{ fontFamily: 'monospace' }}>{row['_displayNumber'] || '—'}</td>
+                              <td>{row['_client_name']?.slice(0, 20) || '—'}</td>
+                              <td style={{ fontFamily: 'monospace', color: recordId ? '#4ade80' : '#f59e0b' }}>
+                                {recordId || '(no match)'}
+                              </td>
                               <td>{row['_note_count']} notes</td>
                             </tr>
                           );
