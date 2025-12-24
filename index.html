@@ -24,7 +24,7 @@ const XANO_CASE_NOTES_ENDPOINT = 'https://xvkq-pq7i-idtl.n7d.xano.io/api:l_gEBOG
 // Relevant Airtable tables for schema inspection
 const AIRTABLE_TABLES = {
   'Client Info': ['Client ID', 'A#', 'First Name', 'Middle Name', 'Family Name', 'Phone Number', 'Client Email', 'Address Line 1', 'Address Line 2', 'City', 'State', 'Zip (5)', 'Country', 'Entry Date', 'Place of Entry', 'DOB', 'clio_contact_id', 'Bahr Client', 'uscis_flatpack_data'],
-  'Case Master View': ['Client', 'clio_matter_id', 'PP ID', 'Description', 'File Case Status', 'Case Notes', 'Bahr Client'],
+  'Case Master View': ['Client', 'clio_matter_id', 'PP ID', 'Description', 'File Case Status', 'Case Notes', 'Bahr Client', 'Matter_Flatpack'],
   'Events': ['Case Master', 'A#', 'Hearing Date/Time', 'Event Type', 'Event Hearing Type', 'Court', 'Judge', 'MCH Attny', 'Bahr Client'],
   'Relationships': ['Case Master View', 'Object Client', 'Relationship', 'Bahr Client'],
 };
@@ -703,6 +703,7 @@ function ClioAirtableMerger() {
       'Case Notes': { inputField: '_aggregated_notes', outputName: 'Case Notes', enabled: true },
       'Bahr Client': { inputField: '_constant_true', outputName: 'Bahr Client', enabled: true },
       'Client': { inputField: '_client_record_id', outputName: 'Client', enabled: true },
+      'Matter_Flatpack': { inputField: '_matter_flatpack_data', outputName: 'Matter_Flatpack', enabled: true },
     },
     // Status value transformations (input value -> output value)
     statusMapping: {
@@ -2976,6 +2977,29 @@ function ClioAirtableMerger() {
             break;
           case 'CloseDate':
             outputRecord[outputName] = matter.closeDate;
+            break;
+          case '_matter_flatpack_data':
+            // Build flatpack data object containing all matter data from all sources
+            const matterFlatpackData = {
+              matterId: matter.matterId,
+              clientId: matter.clientId,
+              displayNumber: matter.displayNumber,
+              description: matter.description,
+              clientName: matter.clientName,
+              status: matter.status,
+              mappedStatus: mappedStatus,
+              openDate: matter.openDate,
+              closeDate: matter.closeDate,
+              notes: sortedNotes.map(note => ({
+                date: note.date,
+                subject: note.subject,
+                detail: note.detail,
+                creator: note.creator
+              })),
+              noteCount: sortedNotes.length,
+              clientRecordId: clientRecordId || null
+            };
+            outputRecord[outputName] = JSON.stringify(matterFlatpackData);
             break;
           default:
             // For any other input field, try to get it from matter object
