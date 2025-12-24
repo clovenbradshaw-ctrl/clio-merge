@@ -927,33 +927,26 @@ function ClioAirtableMerger() {
       return;
     }
 
-    const headers = [
-      'First Name',
-      'Family Name',
-      'Middle Name',
-      'A#',
-      'clio_contact_id',
-      'Client ID',
-      'Phone Number',
-      'Client Email',
-      'DOB',
-      'Matched On',
-      'Existing Airtable ID'
-    ];
+    // Get all unique keys from all client records
+    const allClientKeys = new Set();
+    duplicates.forEach(({ client }) => {
+      Object.keys(client).forEach(key => allClientKeys.add(key));
+    });
 
-    const data = duplicates.map(({ client, existingRecord, matchedOn }) => ({
-      'First Name': client['First Name'] || '',
-      'Family Name': client['Family Name'] || '',
-      'Middle Name': client['Middle Name'] || '',
-      'A#': client['A#'] || '',
-      'clio_contact_id': client['clio_contact_id'] || '',
-      'Client ID': client['Client ID'] || '',
-      'Phone Number': client['Phone Number'] || '',
-      'Client Email': client['Client Email'] || '',
-      'DOB': client['DOB'] || '',
-      'Matched On': matchedOn,
-      'Existing Airtable ID': existingRecord?.id || ''
-    }));
+    // Build headers: all client fields + matching info
+    const headers = [...allClientKeys, 'Matched On', 'Existing Airtable ID'];
+
+    const data = duplicates.map(({ client, existingRecord, matchedOn }) => {
+      const row = {};
+      // Include all client fields
+      allClientKeys.forEach(key => {
+        row[key] = client[key] ?? '';
+      });
+      // Add matching info
+      row['Matched On'] = matchedOn;
+      row['Existing Airtable ID'] = existingRecord?.id || '';
+      return row;
+    });
 
     downloadCSV(data, 'duplicate_clients.csv', headers);
     addSyncLog(`Exported ${duplicates.length} duplicates to CSV`, 'success');
