@@ -692,6 +692,29 @@ function ClioAirtableMerger() {
     progress: { current: 0, total: 0, phase: '' }
   });
 
+  // Phase 2 Field Mapping Configuration
+  const [phase2FieldMapping, setPhase2FieldMapping] = useState({
+    // Mapping from input fields to output field names
+    outputFields: {
+      'clio_matter_id': { inputField: 'UniqueId', outputName: 'clio_matter_id', enabled: true },
+      'PP ID': { inputField: 'DisplayNumber', outputName: 'PP ID', enabled: true },
+      'Description': { inputField: 'Description', outputName: 'Description', enabled: true },
+      'File Case Status': { inputField: 'Status', outputName: 'File Case Status', enabled: true },
+      'Case Notes': { inputField: '_aggregated_notes', outputName: 'Case Notes', enabled: true },
+      'Bahr Client': { inputField: '_constant_true', outputName: 'Bahr Client', enabled: true },
+      'Client': { inputField: '_client_record_id', outputName: 'Client', enabled: true },
+    },
+    // Status value transformations (input value -> output value)
+    statusMapping: {
+      'Open': 'Active',
+      'Closed': 'Closed',
+      'Pending': 'Pending',
+    },
+    // Include internal fields in CSV export
+    includeInternalFields: true,
+  });
+  const [showFieldMapping, setShowFieldMapping] = useState(false);
+
   // Phase 3 state
   const [phase3Files, setPhase3Files] = useState({
     airtableClients: null,
@@ -2879,10 +2902,18 @@ function ClioAirtableMerger() {
       reports.push({ type: 'info', message: `Matched ${notesMatched} notes, ${notesUnmatched} unmatched` });
     }
 
-    // Build Case Master View output
+    // Build Case Master View output using field mappings
     const caseMasterOutput = [];
     let linkedCount = 0;
     let unlinkedCount = 0;
+
+    // Get enabled output field mappings
+    const enabledFields = Object.entries(phase2FieldMapping.outputFields)
+      .filter(([_, config]) => config.enabled)
+      .reduce((acc, [key, config]) => {
+        acc[key] = config;
+        return acc;
+      }, {});
 
     mattersLookup.forEach((matter) => {
       // Find Airtable Record ID for this client
@@ -2905,24 +2936,66 @@ function ClioAirtableMerger() {
         return `${'═'.repeat(55)}\n${datePart}${subjectPart}${creatorPart}\n${'─'.repeat(50)}\n${note.detail || '(No content)'}`;
       }).join('\n\n');
 
-      caseMasterOutput.push({
-        'Client': clientRecordId ? [clientRecordId] : [], // Airtable link field (must be array)
-        'clio_matter_id': matter.matterId,
-        'PP ID': matter.displayNumber,
-        'Description': matter.description,
-        'File Case Status': matter.status === 'Open' ? 'Active' : matter.status,
-        'Case Notes': formattedNotes,
-        'Bahr Client': 'TRUE',
-        '_client_name': matter.clientName,
-        '_note_count': sortedNotes.length,
+      // Apply status mapping transformation
+      const rawStatus = matter.status || '';
+      const mappedStatus = phase2FieldMapping.statusMapping[rawStatus] || rawStatus;
+
+      // Build output record using field mappings
+      const outputRecord = {};
+
+      // Map each enabled field to its output name
+      Object.entries(enabledFields).forEach(([key, config]) => {
+        const outputName = config.outputName || key;
+
+        switch (config.inputField) {
+          case '_client_record_id':
+            outputRecord[outputName] = clientRecordId ? [clientRecordId] : [];
+            break;
+          case '_aggregated_notes':
+            outputRecord[outputName] = formattedNotes;
+            break;
+          case '_constant_true':
+            outputRecord[outputName] = 'TRUE';
+            break;
+          case 'UniqueId':
+            outputRecord[outputName] = matter.matterId;
+            break;
+          case 'DisplayNumber':
+            outputRecord[outputName] = matter.displayNumber;
+            break;
+          case 'Description':
+            outputRecord[outputName] = matter.description;
+            break;
+          case 'Status':
+            outputRecord[outputName] = mappedStatus;
+            break;
+          case 'Client':
+            outputRecord[outputName] = matter.clientName;
+            break;
+          case 'OpenDate':
+            outputRecord[outputName] = matter.openDate;
+            break;
+          case 'CloseDate':
+            outputRecord[outputName] = matter.closeDate;
+            break;
+          default:
+            // For any other input field, try to get it from matter object
+            outputRecord[outputName] = matter[config.inputField] || '';
+        }
       });
+
+      // Always add internal fields for reference (these help with debugging/viewing)
+      outputRecord['_client_name'] = matter.clientName;
+      outputRecord['_note_count'] = sortedNotes.length;
+
+      caseMasterOutput.push(outputRecord);
     });
 
     reports.push({ type: 'info', message: `Generated ${caseMasterOutput.length} Case Master Views (${linkedCount} linked, ${unlinkedCount} unlinked)` });
 
     setPhase2Result({ caseMaster: caseMasterOutput });
     setPhase2Report(reports);
-  }, [phase2Data]);
+  }, [phase2Data, phase2FieldMapping]);
 
   // Upload Case Master Views to Airtable
   const uploadCaseMasterViewsToAirtable = async (testMode = false) => {
@@ -2957,19 +3030,26 @@ function ClioAirtableMerger() {
       const batch = validRecords.slice(i, i + 10);
 
       const airtableRecords = batch.map(record => {
-        const fields = {
-          'clio_matter_id': record['clio_matter_id'] || '',
-          'PP ID': record['PP ID'] || '',
-          'Description': record['Description'] || '',
-          'File Case Status': record['File Case Status'] || '',
-          'Case Notes': record['Case Notes'] || '',
-          'Bahr Client': true,
-        };
+        const fields = {};
 
-        // Only add Client link if we have a valid record ID
-        if (record['Client'] && record['Client'].length > 0 && record['Client'][0]) {
-          fields['Client'] = record['Client']; // Already in array format
-        }
+        // Build fields dynamically from enabled field mappings
+        Object.entries(phase2FieldMapping.outputFields).forEach(([key, config]) => {
+          if (!config.enabled) return;
+          const outputName = config.outputName;
+          const value = record[outputName];
+
+          // Handle special field types
+          if (config.inputField === '_client_record_id') {
+            // Only add Client link if we have a valid record ID
+            if (value && value.length > 0 && value[0]) {
+              fields[outputName] = value; // Already in array format
+            }
+          } else if (config.inputField === '_constant_true') {
+            fields[outputName] = true;
+          } else {
+            fields[outputName] = value || '';
+          }
+        });
 
         return { fields };
       });
@@ -4447,6 +4527,205 @@ function ClioAirtableMerger() {
                 </div>
               )}
 
+              {/* Field Mapping Configuration */}
+              <div style={{ marginBottom: '1.5rem' }}>
+                <button
+                  onClick={() => setShowFieldMapping(!showFieldMapping)}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '0.5rem',
+                    background: 'transparent',
+                    border: '1px solid #3f3f46',
+                    borderRadius: '6px',
+                    padding: '0.5rem 1rem',
+                    color: '#a1a1aa',
+                    cursor: 'pointer',
+                    fontSize: '0.875rem',
+                    width: '100%',
+                    justifyContent: 'space-between'
+                  }}
+                >
+                  <span style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                    <span style={{ fontSize: '1rem' }}>⚙</span>
+                    Field Mapping Configuration
+                  </span>
+                  <span style={{ transform: showFieldMapping ? 'rotate(180deg)' : 'rotate(0deg)', transition: 'transform 0.2s' }}>▼</span>
+                </button>
+
+                {showFieldMapping && (
+                  <div style={{ marginTop: '0.5rem', padding: '1rem', background: '#18181b', borderRadius: '8px', border: '1px solid #3f3f46' }}>
+                    <p style={{ fontSize: '0.75rem', color: '#71717a', marginBottom: '1rem' }}>
+                      Configure how input fields from Clio exports map to output fields in Case Master Views.
+                    </p>
+
+                    {/* Output Field Mappings */}
+                    <div style={{ marginBottom: '1.5rem' }}>
+                      <h5 style={{ fontSize: '0.8rem', color: '#e4e4e7', marginBottom: '0.75rem' }}>Output Field Mappings</h5>
+                      <div style={{ display: 'grid', gap: '0.5rem' }}>
+                        {Object.entries(phase2FieldMapping.outputFields).map(([key, config]) => (
+                          <div key={key} style={{
+                            display: 'grid',
+                            gridTemplateColumns: '24px 1fr 20px 1fr',
+                            gap: '0.5rem',
+                            alignItems: 'center',
+                            padding: '0.5rem',
+                            background: config.enabled ? 'rgba(34, 197, 94, 0.05)' : 'rgba(113, 113, 122, 0.1)',
+                            borderRadius: '4px',
+                            border: '1px solid ' + (config.enabled ? 'rgba(34, 197, 94, 0.2)' : '#27272a')
+                          }}>
+                            <input
+                              type="checkbox"
+                              checked={config.enabled}
+                              onChange={(e) => setPhase2FieldMapping(prev => ({
+                                ...prev,
+                                outputFields: {
+                                  ...prev.outputFields,
+                                  [key]: { ...config, enabled: e.target.checked }
+                                }
+                              }))}
+                              style={{ width: '16px', height: '16px', cursor: 'pointer' }}
+                            />
+                            <div>
+                              <span style={{ fontSize: '0.75rem', color: '#a1a1aa' }}>Input: </span>
+                              <code style={{ fontSize: '0.75rem', color: '#6ee7b7', background: '#1e293b', padding: '2px 6px', borderRadius: '3px' }}>
+                                {config.inputField.startsWith('_') ? config.inputField : config.inputField}
+                              </code>
+                            </div>
+                            <span style={{ color: '#6366f1', fontSize: '1rem', textAlign: 'center' }}>→</span>
+                            <input
+                              type="text"
+                              value={config.outputName}
+                              onChange={(e) => setPhase2FieldMapping(prev => ({
+                                ...prev,
+                                outputFields: {
+                                  ...prev.outputFields,
+                                  [key]: { ...config, outputName: e.target.value }
+                                }
+                              }))}
+                              disabled={!config.enabled}
+                              style={{
+                                padding: '0.35rem 0.5rem',
+                                background: config.enabled ? '#27272a' : '#1f1f23',
+                                border: '1px solid #3f3f46',
+                                borderRadius: '4px',
+                                color: config.enabled ? '#e4e4e7' : '#52525b',
+                                fontSize: '0.75rem',
+                                fontFamily: 'monospace'
+                              }}
+                            />
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* Status Value Mapping */}
+                    <div style={{ marginBottom: '1rem' }}>
+                      <h5 style={{ fontSize: '0.8rem', color: '#e4e4e7', marginBottom: '0.75rem' }}>Status Value Transformations</h5>
+                      <div style={{ display: 'grid', gap: '0.5rem' }}>
+                        {Object.entries(phase2FieldMapping.statusMapping).map(([inputValue, outputValue]) => (
+                          <div key={inputValue} style={{
+                            display: 'grid',
+                            gridTemplateColumns: '1fr 20px 1fr 32px',
+                            gap: '0.5rem',
+                            alignItems: 'center'
+                          }}>
+                            <input
+                              type="text"
+                              value={inputValue}
+                              readOnly
+                              style={{
+                                padding: '0.35rem 0.5rem',
+                                background: '#1f1f23',
+                                border: '1px solid #3f3f46',
+                                borderRadius: '4px',
+                                color: '#a1a1aa',
+                                fontSize: '0.75rem'
+                              }}
+                            />
+                            <span style={{ color: '#6366f1', fontSize: '1rem', textAlign: 'center' }}>→</span>
+                            <input
+                              type="text"
+                              value={outputValue}
+                              onChange={(e) => setPhase2FieldMapping(prev => ({
+                                ...prev,
+                                statusMapping: {
+                                  ...prev.statusMapping,
+                                  [inputValue]: e.target.value
+                                }
+                              }))}
+                              style={{
+                                padding: '0.35rem 0.5rem',
+                                background: '#27272a',
+                                border: '1px solid #3f3f46',
+                                borderRadius: '4px',
+                                color: '#e4e4e7',
+                                fontSize: '0.75rem'
+                              }}
+                            />
+                            <button
+                              onClick={() => setPhase2FieldMapping(prev => {
+                                const newMapping = { ...prev.statusMapping };
+                                delete newMapping[inputValue];
+                                return { ...prev, statusMapping: newMapping };
+                              })}
+                              style={{
+                                padding: '0.25rem',
+                                background: 'rgba(239, 68, 68, 0.1)',
+                                border: '1px solid rgba(239, 68, 68, 0.3)',
+                                borderRadius: '4px',
+                                color: '#ef4444',
+                                cursor: 'pointer',
+                                fontSize: '0.75rem'
+                              }}
+                            >
+                              ✕
+                            </button>
+                          </div>
+                        ))}
+                        <button
+                          onClick={() => {
+                            const newKey = `Status${Object.keys(phase2FieldMapping.statusMapping).length + 1}`;
+                            setPhase2FieldMapping(prev => ({
+                              ...prev,
+                              statusMapping: { ...prev.statusMapping, [newKey]: newKey }
+                            }));
+                          }}
+                          style={{
+                            padding: '0.35rem 0.75rem',
+                            background: 'transparent',
+                            border: '1px dashed #3f3f46',
+                            borderRadius: '4px',
+                            color: '#6366f1',
+                            cursor: 'pointer',
+                            fontSize: '0.75rem'
+                          }}
+                        >
+                          + Add Status Mapping
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Options */}
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', paddingTop: '0.5rem', borderTop: '1px solid #27272a' }}>
+                      <input
+                        type="checkbox"
+                        id="includeInternalFields"
+                        checked={phase2FieldMapping.includeInternalFields}
+                        onChange={(e) => setPhase2FieldMapping(prev => ({
+                          ...prev,
+                          includeInternalFields: e.target.checked
+                        }))}
+                        style={{ width: '14px', height: '14px', cursor: 'pointer' }}
+                      />
+                      <label htmlFor="includeInternalFields" style={{ fontSize: '0.75rem', color: '#a1a1aa', cursor: 'pointer' }}>
+                        Include internal fields (_client_name, _note_count) in CSV export
+                      </label>
+                    </div>
+                  </div>
+                )}
+              </div>
+
               {/* How it works explanation */}
               <div style={{ marginBottom: '1.5rem', padding: '1rem', background: 'rgba(99, 102, 241, 0.1)', borderRadius: '8px', border: '1px solid rgba(99, 102, 241, 0.3)' }}>
                 <h4 style={{ color: '#a5b4fc', marginBottom: '0.75rem', fontSize: '0.875rem' }}>How Case Matters are Created</h4>
@@ -4485,11 +4764,17 @@ function ClioAirtableMerger() {
                 <div>
                   <button
                     className="btn btn-secondary"
-                    onClick={() => downloadCSV(
-                      phase2Result.caseMaster,
-                      'phase2_case_master_views.csv',
-                      ['Client', 'clio_matter_id', 'PP ID', 'Description', 'File Case Status', 'Case Notes', 'Bahr Client', '_client_name', '_note_count']
-                    )}
+                    onClick={() => {
+                      // Build dynamic headers from enabled field mappings
+                      const headers = Object.entries(phase2FieldMapping.outputFields)
+                        .filter(([_, config]) => config.enabled)
+                        .map(([_, config]) => config.outputName);
+                      // Add internal fields if enabled
+                      if (phase2FieldMapping.includeInternalFields) {
+                        headers.push('_client_name', '_note_count');
+                      }
+                      downloadCSV(phase2Result.caseMaster, 'phase2_case_master_views.csv', headers);
+                    }}
                   >
                     Download case_master_views.csv ({phase2Result.caseMaster.length} records)
                   </button>
@@ -4498,21 +4783,34 @@ function ClioAirtableMerger() {
                     <table>
                       <thead>
                         <tr>
-                          <th>Client (Record ID)</th>
-                          <th>PP ID</th>
-                          <th>Description</th>
+                          {Object.entries(phase2FieldMapping.outputFields)
+                            .filter(([_, config]) => config.enabled)
+                            .slice(0, 4)
+                            .map(([key, config]) => (
+                              <th key={key}>{config.outputName}</th>
+                            ))}
                           <th>Notes</th>
                         </tr>
                       </thead>
                       <tbody>
-                        {phase2Result.caseMaster.slice(0, 5).map((row, i) => (
-                          <tr key={i}>
-                            <td style={{ fontFamily: 'monospace', fontSize: '0.7rem' }}>{row['Client'] ? row['Client'].slice(0, 12) + '...' : '—'}</td>
-                            <td>{row['PP ID']}</td>
-                            <td>{row['Description']?.slice(0, 30)}</td>
-                            <td>{row['_note_count']} notes</td>
-                          </tr>
-                        ))}
+                        {phase2Result.caseMaster.slice(0, 5).map((row, i) => {
+                          const enabledFields = Object.entries(phase2FieldMapping.outputFields)
+                            .filter(([_, config]) => config.enabled)
+                            .slice(0, 4);
+                          return (
+                            <tr key={i}>
+                              {enabledFields.map(([key, config]) => {
+                                const value = row[config.outputName];
+                                // Format display based on field type
+                                if (config.inputField === '_client_record_id') {
+                                  return <td key={key} style={{ fontFamily: 'monospace', fontSize: '0.7rem' }}>{value?.length ? '...' : '—'}</td>;
+                                }
+                                return <td key={key}>{typeof value === 'string' ? value?.slice(0, 30) : value}</td>;
+                              })}
+                              <td>{row['_note_count']} notes</td>
+                            </tr>
+                          );
+                        })}
                       </tbody>
                     </table>
                   </div>
