@@ -16,6 +16,7 @@ const { useState, useCallback } = React;
 
 // Constants
 const ANDREW_BAHR_RECORD_ID = 'recRaQ8cur6na6kIw';
+const AIRTABLE_BASE_ID = 'app1tsUyKa7F3sy0D';
 
 // API Configuration
 const XANO_CASE_NOTES_ENDPOINT = 'https://xvkq-pq7i-idtl.n7d.xano.io/api:l_gEBOGc/case_notes';
@@ -707,6 +708,18 @@ function ClioAirtableMerger() {
   const [phase3Result, setPhase3Result] = useState(null);
   const [phase3Report, setPhase3Report] = useState([]);
 
+// Phase 3 Airtable Sync State
+  const [phase3SyncState, setPhase3SyncState] = useState({
+    loading: false,
+    judges: [], // Airtable Judges View records
+    users: [], // Airtable Users records
+    existingEvents: [],
+    existingRelationships: [],
+    preview: { events: { new: [], existing: [], errors: [] }, relationships: { new: [], existing: [], errors: [] } },
+    logs: [],
+    progress: { current: 0, total: 0, phase: '' }
+  });
+
   // Phase 4 state (Case Notes to Xano)
   const [phase4Files, setPhase4Files] = useState({
     airtableClients: null,
@@ -981,6 +994,455 @@ function ClioAirtableMerger() {
       await fetchExistingClients();
       checkDuplicates();
     }
+  };
+
+  // ============================================
+  // PHASE 3 AIRTABLE INTEGRATION
+  // ============================================
+
+  // Add Phase 3 sync log
+  const addPhase3Log = (message, type = 'info') => {
+    setPhase3SyncState(prev => ({
+      ...prev,
+      logs: [...prev.logs, { message, type, time: new Date().toLocaleTimeString() }]
+    }));
+  };
+
+  // Fetch Judges View records from Airtable
+  const fetchJudges = async () => {
+    if (!airtableApiKey) {
+      addPhase3Log('Please enter API key first', 'error');
+      return [];
+    }
+
+    addPhase3Log('Fetching Judges View records...', 'info');
+    const allRecords = [];
+    let offset = null;
+
+    try {
+      do {
+        const url = offset
+          ? `https://api.airtable.com/v0/${AIRTABLE_BASE_ID}/Judges%20View?offset=${offset}`
+          : `https://api.airtable.com/v0/${AIRTABLE_BASE_ID}/Judges%20View`;
+
+        const response = await fetch(url, {
+          headers: { 'Authorization': `Bearer ${airtableApiKey}` }
+        });
+
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const data = await response.json();
+        allRecords.push(...data.records);
+        offset = data.offset;
+      } while (offset);
+
+      addPhase3Log(`Loaded ${allRecords.length} judges`, 'success');
+      return allRecords;
+    } catch (err) {
+      addPhase3Log(`Error fetching judges: ${err.message}`, 'error');
+      return [];
+    }
+  };
+
+  // Fetch Users records from Airtable
+  const fetchUsers = async () => {
+    if (!airtableApiKey) {
+      addPhase3Log('Please enter API key first', 'error');
+      return [];
+    }
+
+    addPhase3Log('Fetching Users records...', 'info');
+    const allRecords = [];
+    let offset = null;
+
+    try {
+      do {
+        const url = offset
+          ? `https://api.airtable.com/v0/${AIRTABLE_BASE_ID}/Users?offset=${offset}`
+          : `https://api.airtable.com/v0/${AIRTABLE_BASE_ID}/Users`;
+
+        const response = await fetch(url, {
+          headers: { 'Authorization': `Bearer ${airtableApiKey}` }
+        });
+
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const data = await response.json();
+        allRecords.push(...data.records);
+        offset = data.offset;
+      } while (offset);
+
+      addPhase3Log(`Loaded ${allRecords.length} users`, 'success');
+      return allRecords;
+    } catch (err) {
+      addPhase3Log(`Error fetching users: ${err.message}`, 'error');
+      return [];
+    }
+  };
+
+  // Initialize Phase 3 lookup tables
+  const initPhase3Lookups = async () => {
+    if (!airtableApiKey) {
+      addPhase3Log('Please enter API key first', 'error');
+      return;
+    }
+
+    setPhase3SyncState(prev => ({ ...prev, loading: true, logs: [] }));
+
+    const [judges, users] = await Promise.all([fetchJudges(), fetchUsers()]);
+
+    setPhase3SyncState(prev => ({
+      ...prev,
+      judges,
+      users,
+      loading: false
+    }));
+
+    addPhase3Log(`Ready: ${judges.length} judges, ${users.length} users loaded`, 'success');
+  };
+
+  // Map judge name to Airtable record ID
+  const findJudgeRecordId = (judgeName) => {
+    if (!judgeName) return null;
+    const normalized = judgeName.toUpperCase().trim();
+
+    for (const judge of phase3SyncState.judges) {
+      const airtableName = (judge.fields['Judge'] || '').toUpperCase().trim();
+      if (airtableName && (airtableName.includes(normalized) || normalized.includes(airtableName))) {
+        return judge.id;
+      }
+    }
+    return null;
+  };
+
+  // Map user/attorney name to Airtable record ID
+  const findUserRecordId = (userName) => {
+    if (!userName) return ANDREW_BAHR_RECORD_ID; // Default to Andrew Bahr
+    const normalized = userName.toUpperCase().trim();
+
+    for (const user of phase3SyncState.users) {
+      const name = (user.fields['Name'] || '').toUpperCase().trim();
+      const firstName = (user.fields['First Name'] || '').toUpperCase().trim();
+      const lastName = (user.fields['Last Name'] || '').toUpperCase().trim();
+
+      if (name && (name.includes(normalized) || normalized.includes(name))) {
+        return user.id;
+      }
+      if (firstName && lastName && normalized.includes(firstName) && normalized.includes(lastName)) {
+        return user.id;
+      }
+    }
+    return ANDREW_BAHR_RECORD_ID; // Default fallback
+  };
+
+  // Map court name from Clio to Airtable Court/Office options
+  const mapCourtToAirtable = (courtStr) => {
+    if (!courtStr) return null;
+    const normalized = courtStr.toUpperCase();
+
+    // Common court mappings
+    const courtMappings = {
+      'STERLING': 'Sterling IM',
+      'ARLINGTON': 'Arlington IM ',
+      'ANNANDALE': 'Annandale IM',
+      'BALTIMORE': 'Baltimore IM',
+      'HYATTSVILLE': 'Hyattsville IM',
+      'FALLS CHURCH': 'Falls Church IAC',
+      'CHARLOTTE': 'Charlotte IM ',
+      'DALLAS': 'Dallas IM',
+      'HOUSTON': 'Houston IM',
+      'LOS ANGELES': 'Los Angeles IM',
+      'NEW YORK': 'New York IM',
+      'MIAMI': 'Miami IM',
+      'ATLANTA': 'Atlanta IM',
+      'CHICAGO': 'Chicago IM',
+      'SAN ANTONIO': 'San Antonio IM',
+      'DENVER': 'Denver IM',
+      'SEATTLE': 'Seattle IM',
+      'BOSTON': 'Boston IM',
+      'NEWARK': 'Newark IM',
+      'PHILADELPHIA': 'Philadelphia IM',
+      'ORLANDO': 'Orlando IM',
+      'SAN FRANCISCO': 'San Francisco IM',
+      'SAN DIEGO': 'San Diego IM',
+      'HARLINGEN': 'Harlingen IM',
+      'EL PASO': 'El Paso IM',
+      'PEARSALL': 'Pearsall IM',
+      'LUMPKIN': 'Lumpkin, GA',
+      'STEWART': 'Stewart, GA',
+      'ADELANTO': 'Adelanto IM',
+      'MEMPHIS': 'Memphis IM',
+      'NEW ORLEANS': 'New Orleans IM',
+      'OMAHA': 'Omaha IM',
+      'LAS VEGAS': 'Las Vegas IM',
+      'DETROIT': 'Detroit IM',
+      'CLEVELAND': 'Cleveland IM',
+      'LOUISVILLE': 'Louisville, KY',
+      'ELIZABETH': 'Elizabeth IM',
+      'OAKDALE': 'Oakdale IM',
+      'CHELMSFORD': 'Chelmsford IM',
+      'FORT WORTH': 'Fort Worth IAC',
+      'HARTFORD': 'Hartford IM',
+      'BUFFALO': 'Buffalo IM',
+      'FORT SNELLING': 'Fort Snelling IM',
+      'PITTSBURGH': 'Pittsburgh USCIS',
+    };
+
+    for (const [key, value] of Object.entries(courtMappings)) {
+      if (normalized.includes(key)) {
+        return value;
+      }
+    }
+
+    return null; // Will need manual review
+  };
+
+  // Map Event Hearing Type from Clio to Airtable options
+  const mapEventHearingType = (clioType) => {
+    if (!clioType) return null;
+    const normalized = clioType.toUpperCase();
+
+    const typeMap = {
+      'MASTER': 'Master',
+      'MCH': 'Master',
+      'INDIVIDUAL': 'Individual',
+      'ICH': 'Individual',
+      'BOND': 'Bond',
+      'STATUS': 'Status Docket',
+      'STATUS DOCKET': 'Status Docket',
+      'CUSTODY': 'Custody',
+      'CALENDAR': 'Calendar Control',
+      'PRE-HEARING': 'Pre-Hearing Conf',
+      'PREHEARING': 'Pre-Hearing Conf',
+      'ASYLUM INTERVIEW': 'Asylum Interview',
+      'USCIS': 'USCIS Interview',
+      'CALL UP': 'Call up Date',
+      'CONTESTED': 'Contested Hearing',
+      'APPEAL': 'Appeal Notice Due',
+      'BRIEF': 'Brief Due',
+    };
+
+    for (const [key, value] of Object.entries(typeMap)) {
+      if (normalized.includes(key)) {
+        return value;
+      }
+    }
+
+    return 'Master'; // Default fallback
+  };
+
+  // Upload Events to Airtable
+  const uploadEventsToAirtable = async (testMode = false) => {
+    if (!phase3Result?.events?.length) {
+      addPhase3Log('No events to upload', 'warning');
+      return;
+    }
+
+    const eventsToCreate = testMode ? phase3Result.events.slice(0, 5) : phase3Result.events;
+
+    // Filter to only events with Case Master links
+    const validEvents = eventsToCreate.filter(e => e['Case Master']);
+
+    if (validEvents.length === 0) {
+      addPhase3Log('No events with valid Case Master links to upload', 'warning');
+      return;
+    }
+
+    setPhase3SyncState(prev => ({
+      ...prev,
+      loading: true,
+      progress: { current: 0, total: validEvents.length, phase: 'Uploading Events' }
+    }));
+
+    addPhase3Log(`${testMode ? 'TEST: ' : ''}Starting upload of ${validEvents.length} events...`, 'info');
+
+    let created = 0;
+    let failed = 0;
+
+    // Process in batches of 10
+    for (let i = 0; i < validEvents.length; i += 10) {
+      const batch = validEvents.slice(i, i + 10);
+
+      const airtableRecords = batch.map(event => {
+        const fields = {
+          'Case Master': [event['Case Master']], // Link field - array of record IDs
+          'Hearing Date/Time': event['Hearing Date/Time'] || null,
+          'Event Type': 'Court Event',
+          'Event Hearing Type': mapEventHearingType(event['Event Hearing Type']) ? [mapEventHearingType(event['Event Hearing Type'])] : ['Master'],
+          'Bahr Client': true,
+        };
+
+        // Add Court/Office if we can map it
+        const court = mapCourtToAirtable(event['Court']);
+        if (court) {
+          fields['Court/Office'] = [court];
+        }
+
+        // Add Judge link if we can find it
+        const judgeId = findJudgeRecordId(event['Judge']);
+        if (judgeId) {
+          fields['Judge'] = [judgeId];
+        }
+
+        // Add MCH Attny - default to Andrew Bahr
+        fields['MCH Attny'] = [ANDREW_BAHR_RECORD_ID];
+
+        // Add clio_contact_id if available
+        if (event['clio_contact_id']) {
+          fields['clio_contact_id'] = event['clio_contact_id'];
+        }
+
+        return { fields };
+      });
+
+      try {
+        const response = await fetch(
+          `https://api.airtable.com/v0/${AIRTABLE_BASE_ID}/Events`,
+          {
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${airtableApiKey}`,
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ records: airtableRecords })
+          }
+        );
+
+        if (!response.ok) {
+          const errData = await response.json().catch(() => ({}));
+          throw new Error(errData.error?.message || `HTTP ${response.status}`);
+        }
+
+        const result = await response.json();
+        created += result.records.length;
+        addPhase3Log(`Events batch ${Math.floor(i/10) + 1}: Created ${result.records.length} records`, 'success');
+
+        setPhase3SyncState(prev => ({
+          ...prev,
+          progress: { ...prev.progress, current: i + batch.length }
+        }));
+      } catch (err) {
+        failed += batch.length;
+        addPhase3Log(`Events batch ${Math.floor(i/10) + 1} failed: ${err.message}`, 'error');
+      }
+
+      // Rate limiting
+      await new Promise(resolve => setTimeout(resolve, 250));
+    }
+
+    setPhase3SyncState(prev => ({
+      ...prev,
+      loading: false,
+      progress: { current: validEvents.length, total: validEvents.length, phase: 'Events Complete' }
+    }));
+
+    addPhase3Log(`Events upload complete: ${created} created, ${failed} failed`, created > 0 ? 'success' : 'error');
+  };
+
+  // Upload Relationships to Airtable
+  const uploadRelationshipsToAirtable = async (testMode = false) => {
+    if (!phase3Result?.relationships?.length) {
+      addPhase3Log('No relationships to upload', 'warning');
+      return;
+    }
+
+    const relsToCreate = testMode ? phase3Result.relationships.slice(0, 5) : phase3Result.relationships;
+
+    // Filter to only relationships with valid links
+    const validRels = relsToCreate.filter(r => r['Case Master View'] && r['Object Client']);
+
+    if (validRels.length === 0) {
+      addPhase3Log('No relationships with valid links to upload', 'warning');
+      return;
+    }
+
+    setPhase3SyncState(prev => ({
+      ...prev,
+      loading: true,
+      progress: { current: 0, total: validRels.length, phase: 'Uploading Relationships' }
+    }));
+
+    addPhase3Log(`${testMode ? 'TEST: ' : ''}Starting upload of ${validRels.length} relationships...`, 'info');
+
+    let created = 0;
+    let failed = 0;
+
+    // Map relationship types to Airtable options
+    const relationshipMap = {
+      'Spouse': 'LEGAL SPOUSE',
+      'Child': 'CHILD',
+      'Parent': 'PARENT',
+      'Sibling': 'SIBLING',
+      'Partner': 'PARTNER',
+      'Custodian': 'CUSTODIAN',
+      'Ward': 'LEGAL WARD',
+    };
+
+    // Process in batches of 10
+    for (let i = 0; i < validRels.length; i += 10) {
+      const batch = validRels.slice(i, i + 10);
+
+      const airtableRecords = batch.map(rel => {
+        const relType = relationshipMap[rel['Relationship']] || rel['Relationship']?.toUpperCase() || 'CHILD';
+
+        const fields = {
+          'Case Master View': [rel['Case Master View']], // Link field
+          'Object Client': [rel['Object Client']], // Link field
+          'Relationship': relType,
+          'Bahr Client': true,
+        };
+
+        // Add clio_contact_ids if available
+        if (rel['clio_contact_id_a']) {
+          fields['clio_contact_id_a'] = rel['clio_contact_id_a'];
+        }
+        if (rel['clio_contact_id_b']) {
+          fields['clio_contact_id_b'] = rel['clio_contact_id_b'];
+        }
+
+        return { fields };
+      });
+
+      try {
+        const response = await fetch(
+          `https://api.airtable.com/v0/${AIRTABLE_BASE_ID}/Relationships`,
+          {
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${airtableApiKey}`,
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ records: airtableRecords })
+          }
+        );
+
+        if (!response.ok) {
+          const errData = await response.json().catch(() => ({}));
+          throw new Error(errData.error?.message || `HTTP ${response.status}`);
+        }
+
+        const result = await response.json();
+        created += result.records.length;
+        addPhase3Log(`Relationships batch ${Math.floor(i/10) + 1}: Created ${result.records.length} records`, 'success');
+
+        setPhase3SyncState(prev => ({
+          ...prev,
+          progress: { ...prev.progress, current: i + batch.length }
+        }));
+      } catch (err) {
+        failed += batch.length;
+        addPhase3Log(`Relationships batch ${Math.floor(i/10) + 1} failed: ${err.message}`, 'error');
+      }
+
+      // Rate limiting
+      await new Promise(resolve => setTimeout(resolve, 250));
+    }
+
+    setPhase3SyncState(prev => ({
+      ...prev,
+      loading: false,
+      progress: { current: validRels.length, total: validRels.length, phase: 'Relationships Complete' }
+    }));
+
+    addPhase3Log(`Relationships upload complete: ${created} created, ${failed} failed`, created > 0 ? 'success' : 'error');
   };
 
   // Fetch Airtable bases
@@ -4032,6 +4494,110 @@ function ClioAirtableMerger() {
                       </div>
                     </div>
                   )}
+
+                  {/* Airtable Direct Upload Section */}
+                  <div style={{ marginTop: '1.5rem', padding: '1rem', background: 'rgba(99, 102, 241, 0.1)', borderRadius: '8px', border: '1px solid rgba(99, 102, 241, 0.3)' }}>
+                    <h4 style={{ color: '#a5b4fc', marginBottom: '1rem' }}>Direct Upload to Airtable</h4>
+                    <p style={{ fontSize: '0.8rem', color: '#71717a', marginBottom: '1rem' }}>
+                      Upload events and relationships directly to Airtable. Base ID: <code style={{ background: '#1e293b', padding: '2px 6px', borderRadius: '4px' }}>{AIRTABLE_BASE_ID}</code>
+                    </p>
+
+                    {/* API Key Input */}
+                    <div style={{ marginBottom: '1rem' }}>
+                      <label style={{ fontSize: '0.75rem', color: '#94a3b8', display: 'block', marginBottom: '0.25rem' }}>Airtable API Key</label>
+                      <input
+                        type="password"
+                        value={airtableApiKey}
+                        onChange={(e) => setAirtableApiKey(e.target.value)}
+                        placeholder="pat..."
+                        style={{ width: '100%', padding: '0.5rem', background: '#1e293b', border: '1px solid #475569', borderRadius: '6px', color: '#e2e8f0', fontSize: '0.8rem' }}
+                      />
+                    </div>
+
+                    {/* Stats Row */}
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '0.5rem', marginBottom: '1rem' }}>
+                      <div style={{ background: '#1e293b', padding: '0.75rem', borderRadius: '6px', textAlign: 'center' }}>
+                        <div style={{ fontSize: '1.5rem', fontWeight: 'bold', color: '#6366f1' }}>{phase3Result?.events?.length || 0}</div>
+                        <div style={{ fontSize: '0.7rem', color: '#94a3b8' }}>Events</div>
+                      </div>
+                      <div style={{ background: '#1e293b', padding: '0.75rem', borderRadius: '6px', textAlign: 'center' }}>
+                        <div style={{ fontSize: '1.5rem', fontWeight: 'bold', color: '#10b981' }}>{phase3Result?.events?.filter(e => e['Case Master']).length || 0}</div>
+                        <div style={{ fontSize: '0.7rem', color: '#94a3b8' }}>Linked Events</div>
+                      </div>
+                      <div style={{ background: '#1e293b', padding: '0.75rem', borderRadius: '6px', textAlign: 'center' }}>
+                        <div style={{ fontSize: '1.5rem', fontWeight: 'bold', color: '#8b5cf6' }}>{phase3Result?.relationships?.length || 0}</div>
+                        <div style={{ fontSize: '0.7rem', color: '#94a3b8' }}>Relationships</div>
+                      </div>
+                      <div style={{ background: '#1e293b', padding: '0.75rem', borderRadius: '6px', textAlign: 'center' }}>
+                        <div style={{ fontSize: '1.5rem', fontWeight: 'bold', color: '#f59e0b' }}>{phase3SyncState.judges.length + phase3SyncState.users.length}</div>
+                        <div style={{ fontSize: '0.7rem', color: '#94a3b8' }}>Lookups Loaded</div>
+                      </div>
+                    </div>
+
+                    {/* Action Buttons */}
+                    <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', marginBottom: '1rem' }}>
+                      <button
+                        className="btn btn-primary"
+                        onClick={initPhase3Lookups}
+                        disabled={phase3SyncState.loading || !airtableApiKey}
+                        style={{ fontSize: '0.8rem' }}
+                      >
+                        {phase3SyncState.loading ? 'Loading...' : '1. Load Lookups'}
+                      </button>
+                      <button
+                        onClick={() => uploadEventsToAirtable(true)}
+                        disabled={phase3SyncState.loading || !phase3Result?.events?.length || phase3SyncState.judges.length === 0}
+                        style={{ fontSize: '0.8rem', padding: '0.5rem 1rem', background: !phase3Result?.events?.length ? '#78716c' : '#f59e0b', color: 'white', border: 'none', borderRadius: '6px', cursor: !phase3Result?.events?.length ? 'not-allowed' : 'pointer', opacity: !phase3Result?.events?.length ? 0.6 : 1 }}
+                      >
+                        2. Test Events (5)
+                      </button>
+                      <button
+                        onClick={() => uploadEventsToAirtable(false)}
+                        disabled={phase3SyncState.loading || !phase3Result?.events?.length || phase3SyncState.judges.length === 0}
+                        style={{ fontSize: '0.8rem', padding: '0.5rem 1rem', background: !phase3Result?.events?.length ? '#78716c' : '#10b981', color: 'white', border: 'none', borderRadius: '6px', cursor: !phase3Result?.events?.length ? 'not-allowed' : 'pointer', opacity: !phase3Result?.events?.length ? 0.6 : 1 }}
+                      >
+                        3. Upload All Events ({phase3Result?.events?.filter(e => e['Case Master']).length || 0})
+                      </button>
+                      <button
+                        onClick={() => uploadRelationshipsToAirtable(true)}
+                        disabled={phase3SyncState.loading || !phase3Result?.relationships?.length}
+                        style={{ fontSize: '0.8rem', padding: '0.5rem 1rem', background: !phase3Result?.relationships?.length ? '#78716c' : '#8b5cf6', color: 'white', border: 'none', borderRadius: '6px', cursor: !phase3Result?.relationships?.length ? 'not-allowed' : 'pointer', opacity: !phase3Result?.relationships?.length ? 0.6 : 1 }}
+                      >
+                        4. Test Relationships (5)
+                      </button>
+                      <button
+                        onClick={() => uploadRelationshipsToAirtable(false)}
+                        disabled={phase3SyncState.loading || !phase3Result?.relationships?.length}
+                        style={{ fontSize: '0.8rem', padding: '0.5rem 1rem', background: !phase3Result?.relationships?.length ? '#78716c' : '#ec4899', color: 'white', border: 'none', borderRadius: '6px', cursor: !phase3Result?.relationships?.length ? 'not-allowed' : 'pointer', opacity: !phase3Result?.relationships?.length ? 0.6 : 1 }}
+                      >
+                        5. Upload All Relationships ({phase3Result?.relationships?.filter(r => r['Case Master View'] && r['Object Client']).length || 0})
+                      </button>
+                    </div>
+
+                    {/* Progress Bar */}
+                    {phase3SyncState.progress.total > 0 && (
+                      <div style={{ marginBottom: '1rem' }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.75rem', color: '#94a3b8', marginBottom: '0.25rem' }}>
+                          <span>{phase3SyncState.progress.phase}</span>
+                          <span>{phase3SyncState.progress.current} / {phase3SyncState.progress.total}</span>
+                        </div>
+                        <div style={{ background: '#1e293b', borderRadius: '4px', height: '8px', overflow: 'hidden' }}>
+                          <div style={{ height: '100%', background: 'linear-gradient(90deg, #6366f1, #10b981)', width: `${(phase3SyncState.progress.current / phase3SyncState.progress.total) * 100}%`, transition: 'width 0.3s' }} />
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Logs */}
+                    {phase3SyncState.logs.length > 0 && (
+                      <div style={{ background: '#0f172a', borderRadius: '6px', padding: '0.75rem', maxHeight: '200px', overflowY: 'auto', fontSize: '0.75rem', fontFamily: 'monospace' }}>
+                        {phase3SyncState.logs.map((log, i) => (
+                          <div key={i} style={{ color: log.type === 'error' ? '#ef4444' : log.type === 'success' ? '#10b981' : log.type === 'warning' ? '#f59e0b' : '#94a3b8', marginBottom: '0.25rem' }}>
+                            <span style={{ color: '#475569' }}>[{log.time}]</span> {log.message}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
                 </div>
               )}
             </div>
@@ -4654,8 +5220,8 @@ function ClioAirtableMerger() {
               <ol style={{ paddingLeft: '1.25rem', color: '#a1a1aa' }}>
                 <li>Upload both Airtable exports</li>
                 <li>Upload Clio Events/Relationships</li>
-                <li>Download events.csv & relationships.csv</li>
-                <li>Import to Airtable</li>
+                <li>Generate events & relationships</li>
+                <li>Upload directly to Airtable (or download CSV)</li>
               </ol>
             </div>
             <div>
