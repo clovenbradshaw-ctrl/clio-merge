@@ -623,10 +623,24 @@ function AirtableSync() {
       }
 
       // Handle link fields (need to be arrays of record IDs)
-      if (config.type === 'link' && value && typeof value === 'string') {
-        // If it's a record ID (starts with 'rec'), wrap in array
-        if (value.startsWith('rec')) {
-          value = [value];
+      if (config.type === 'link' && value) {
+        if (typeof value === 'string') {
+          // Only include if it's a valid record ID
+          if (value.startsWith('rec')) {
+            value = [value];
+          } else {
+            // Not a valid record ID - skip this field
+            value = null;
+          }
+        } else if (Array.isArray(value)) {
+          // Filter to only valid record IDs
+          value = value.filter(v => typeof v === 'string' && v.startsWith('rec'));
+          if (value.length === 0) {
+            value = null;
+          }
+        } else {
+          // Unknown format - skip
+          value = null;
         }
       }
 
