@@ -2961,10 +2961,51 @@ function ClioAirtableMerger() {
     // Build MatterId -> Matter info lookup from Clio Matters
     const mattersLookup = new Map();
 
+    // Try multiple possible field names for clio_id in Clio export
+    const CLIO_ID_FIELD_NAMES = ['clio_id', 'Client.id', 'ClientId', 'Client ID', 'clio_contact_id', 'Contact ID', 'ContactId'];
+    let detectedClioIdField = null;
+    let clioMattersColumns = [];
+
     if (phase2Data.clioMatters?.rows) {
+      // First, detect which field name is being used for the client ID
+      const sampleRow = phase2Data.clioMatters.rows[0];
+      if (sampleRow) {
+        clioMattersColumns = Object.keys(sampleRow);
+        reports.push({ type: 'info', message: `Clio Matters columns: ${clioMattersColumns.join(', ')}` });
+
+        // Find the first matching field name that has values
+        for (const fieldName of CLIO_ID_FIELD_NAMES) {
+          if (clioMattersColumns.includes(fieldName)) {
+            // Check if this field has actual values
+            const hasValues = phase2Data.clioMatters.rows.some(row => row[fieldName] && String(row[fieldName]).trim());
+            if (hasValues) {
+              detectedClioIdField = fieldName;
+              reports.push({ type: 'info', message: `Using field "${fieldName}" for client ID matching` });
+              break;
+            }
+          }
+        }
+
+        if (!detectedClioIdField) {
+          reports.push({ type: 'warning', message: `No client ID field found in Clio export. Looked for: ${CLIO_ID_FIELD_NAMES.join(', ')}` });
+        }
+      }
+
       phase2Data.clioMatters.rows.forEach((row) => {
         const matterId = row['UniqueId'] || '';
-        const clientId = String(row['ClientId'] || '').trim();
+        // Use detected field name, or try all possibilities
+        let clientId = '';
+        if (detectedClioIdField) {
+          clientId = String(row[detectedClioIdField] || '').trim();
+        } else {
+          // Fallback: try all possible field names
+          for (const fieldName of CLIO_ID_FIELD_NAMES) {
+            if (row[fieldName]) {
+              clientId = String(row[fieldName]).trim();
+              break;
+            }
+          }
+        }
         const displayNumber = row['DisplayNumber'] || '';
         const description = row['Description'] || '';
         const client = row['Client'] || '';
@@ -2975,7 +3016,7 @@ function ClioAirtableMerger() {
         if (matterId) {
           mattersLookup.set(matterId, {
             matterId,
-            clientId, // This is the clio_contact_id
+            clientId, // This is the clio_contact_id used for Airtable linking
             displayNumber,
             description,
             clientName: client,
@@ -2990,7 +3031,8 @@ function ClioAirtableMerger() {
       // Show sample ClientId values for comparison with clio_contact_id
       if (mattersLookup.size > 0) {
         const sampleMatters = Array.from(mattersLookup.values()).slice(0, 2);
-        reports.push({ type: 'info', message: `Sample Clio ClientId values: ${sampleMatters.map(m => `"${m.clientId}"` || '(empty)').join(', ')}` });
+        const hasClientIds = sampleMatters.some(m => m.clientId);
+        reports.push({ type: hasClientIds ? 'info' : 'warning', message: `Sample Clio client ID values: ${sampleMatters.map(m => m.clientId ? `"${m.clientId}"` : '(empty)').join(', ')}` });
       }
     }
 
@@ -3209,6 +3251,9 @@ function ClioAirtableMerger() {
       sampleAirtableIds: Array.from(clioContactToRecordId.keys()).slice(0, 5),
       // Get sample Clio ClientIds for comparison
       sampleClioClientIds: Array.from(mattersLookup.values()).slice(0, 5).map(m => m.clientId),
+      // Detected field name and available columns for debugging
+      detectedClioIdField,
+      clioMattersColumns,
     };
 
     setPhase2Result({ caseMaster: caseMasterOutput, matchingStats });
@@ -5225,7 +5270,7 @@ function ClioAirtableMerger() {
                     <h4 style={{ color: phase2Result?.matchingStats?.linkedCount > 0 ? '#4ade80' : '#f87171', marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                       {phase2Result?.matchingStats?.linkedCount > 0 ? '✓' : '✗'} Client Matching Test
                       <span style={{ fontSize: '0.75rem', fontWeight: 'normal', color: '#94a3b8' }}>
-                        (Clio ClientId → Airtable clio_contact_id → Record ID)
+                        (Clio {phase2Result?.matchingStats?.detectedClioIdField || 'ClientId'} → Airtable clio_contact_id → Record ID)
                       </span>
                     </h4>
 
@@ -5237,7 +5282,7 @@ function ClioAirtableMerger() {
                       </div>
                       <div style={{ background: '#1e293b', padding: '0.75rem', borderRadius: '6px', textAlign: 'center' }}>
                         <div style={{ fontSize: '1.25rem', fontWeight: 'bold', color: '#6366f1' }}>{phase2Result?.matchingStats?.totalMatters || 0}</div>
-                        <div style={{ fontSize: '0.65rem', color: '#71717a' }}>Clio Matters<br/>(with ClientId)</div>
+                        <div style={{ fontSize: '0.65rem', color: '#71717a' }}>Clio Matters<br/>(using {phase2Result?.matchingStats?.detectedClioIdField || 'no ID field'})</div>
                       </div>
                       <div style={{ background: '#1e293b', padding: '0.75rem', borderRadius: '6px', textAlign: 'center' }}>
                         <div style={{ fontSize: '1.25rem', fontWeight: 'bold', color: '#22c55e' }}>{phase2Result?.matchingStats?.linkedCount || 0}</div>
@@ -5261,11 +5306,11 @@ function ClioAirtableMerger() {
                         </div>
                       </div>
                       <div style={{ background: '#1e293b', padding: '0.75rem', borderRadius: '6px' }}>
-                        <div style={{ fontSize: '0.7rem', color: '#a5b4fc', marginBottom: '0.5rem', fontWeight: 'bold' }}>Sample Clio Matter ClientId values:</div>
+                        <div style={{ fontSize: '0.7rem', color: '#a5b4fc', marginBottom: '0.5rem', fontWeight: 'bold' }}>Sample Clio Matter {phase2Result?.matchingStats?.detectedClioIdField || 'client ID'} values:</div>
                         <div style={{ fontFamily: 'monospace', fontSize: '0.7rem', color: '#94a3b8' }}>
-                          {phase2Result?.matchingStats?.sampleClioClientIds?.length > 0
-                            ? phase2Result.matchingStats.sampleClioClientIds.map((id, i) => <div key={i}>"{id}"</div>)
-                            : <span style={{ color: '#f87171' }}>No ClientId values found in Clio export</span>
+                          {phase2Result?.matchingStats?.sampleClioClientIds?.length > 0 && phase2Result.matchingStats.sampleClioClientIds.some(id => id)
+                            ? phase2Result.matchingStats.sampleClioClientIds.map((id, i) => <div key={i}>"{id || '(empty)'}"</div>)
+                            : <span style={{ color: '#f87171' }}>No {phase2Result?.matchingStats?.detectedClioIdField || 'client ID'} values found. Available columns: {phase2Result?.matchingStats?.clioMattersColumns?.join(', ') || 'none'}</span>
                           }
                         </div>
                       </div>
