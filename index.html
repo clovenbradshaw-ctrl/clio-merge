@@ -77,8 +77,15 @@ const XANO_CASE_NOTES_SCHEMA = {
 };
 
 // State-machine CSV Parser - handles multiline quoted fields correctly
+// Auto-detects delimiter (tab or comma)
 const parseCSV = (text) => {
   if (!text || !text.trim()) return { headers: [], rows: [] };
+
+  // Auto-detect delimiter by checking first line
+  const firstLine = text.split(/\r?\n/)[0] || '';
+  const tabCount = (firstLine.match(/\t/g) || []).length;
+  const commaCount = (firstLine.match(/,/g) || []).length;
+  const delimiter = tabCount > commaCount ? '\t' : ',';
 
   const rows = [];
   let currentRow = [];
@@ -101,7 +108,7 @@ const parseCSV = (text) => {
     } else {
       if (char === '"') {
         inQuotes = true;
-      } else if (char === ',') {
+      } else if (char === delimiter) {
         currentRow.push(currentField.trim());
         currentField = '';
       } else if (char === '\n' || (char === '\r' && nextChar === '\n')) {
