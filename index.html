@@ -3248,69 +3248,118 @@ function ClioAirtableMerger() {
     let created = 0;
     let failed = 0;
 
-    // Get list of valid field IDs from schema
+    // Get list of valid field IDs and names from schema
     const validFieldIds = new Set(caseMasterSchema.fields.map(f => f.id));
+    const fieldNameToId = new Map(caseMasterSchema.fields.map(f => [f.name, f.id]));
+    const fieldIdToName = new Map(caseMasterSchema.fields.map(f => [f.id, f.name]));
+
+    // Build mapping from our output field names to Airtable field names
+    const ourFieldToAirtable = {
+      'Display_Number': 'PP ID',
+      'Client_Name': 'Client Name',
+      'Matter_ID': 'clio_matter_id',
+      'Description': 'Description',
+      'Status': 'Status',
+      'Mapped_Status': 'File Case Status',
+      'Notes': 'Case Notes',
+      'Note_Count': 'Note Count',
+      'Airtable_Record_ID': 'Edit Client Info', // Link field
+      'Client_ID': 'Client ID',
+      'Open_Date': 'Open Date',
+      'Close_Date': 'Close Date',
+    };
+
+    // Debug: Log schema fields
+    addPhase2Log(`Schema has ${caseMasterSchema.fields.length} fields: ${caseMasterSchema.fields.slice(0, 5).map(f => f.name).join(', ')}...`, 'info');
+
+    // Debug: Log first record structure
+    if (validRecords.length > 0) {
+      const firstRec = validRecords[0];
+      const recKeys = Object.keys(firstRec).filter(k => !k.startsWith('_'));
+      addPhase2Log(`First record has ${recKeys.length} fields: ${recKeys.slice(0, 8).join(', ')}...`, 'info');
+      // Show sample values
+      const sampleFields = ['Display_Number', 'Client_Name', 'Airtable_Record_ID'].map(k => `${k}="${firstRec[k] || '(empty)'}"`).join(', ');
+      addPhase2Log(`Sample values: ${sampleFields}`, 'info');
+    }
 
     // Debug: Count records with valid client links
     const clientLinkFieldId = Object.entries(phase2FieldMapping.outputFields)
       .find(([, config]) => config.inputField === '_client_record_id' && config.enabled)?.[0];
     if (clientLinkFieldId) {
       const withClientLink = validRecords.filter(r => Array.isArray(r[clientLinkFieldId]) && r[clientLinkFieldId].length > 0 && r[clientLinkFieldId][0]).length;
-      addPhase2Log(`Client links: ${withClientLink}/${validRecords.length} records have valid Airtable Record IDs`, 'info');
+      addPhase2Log(`Client links (schema-mapped): ${withClientLink}/${validRecords.length} records`, 'info');
     }
+    // Also check our direct field
+    const withDirectLink = validRecords.filter(r => r['Airtable_Record_ID']).length;
+    addPhase2Log(`Client links (Airtable_Record_ID): ${withDirectLink}/${validRecords.length} records`, 'info');
 
     // Process in batches of 10 (Airtable API limit)
     for (let i = 0; i < validRecords.length; i += 10) {
       const batch = validRecords.slice(i, i + 10);
 
-      const airtableRecords = batch.map(record => {
+      const airtableRecords = batch.map((record, recIdx) => {
         const fields = {};
 
-        // Build fields using field IDs from the record (already keyed by field ID)
+        // Map our standard field names to Airtable field names, then use field name directly
+        // Airtable API accepts field names, not just field IDs
         Object.entries(record).forEach(([key, value]) => {
           // Skip internal fields (starting with _)
           if (key.startsWith('_')) return;
+          if (value === undefined || value === null || value === '') return;
 
-          // Only include fields that exist in the schema
-          if (!validFieldIds.has(key)) return;
-
-          const config = phase2FieldMapping.outputFields[key];
-          if (!config || !config.enabled) return;
-
-          // Handle special field types based on Airtable field type
-          if (config.fieldType === 'multipleRecordLinks') {
-            // Link fields: only add if we have valid record ID(s)
-            if (Array.isArray(value) && value.length > 0 && value[0]) {
-              fields[key] = value;
+          // Check if this is one of our standard fields that needs mapping
+          const airtableFieldName = ourFieldToAirtable[key];
+          if (airtableFieldName) {
+            // Special handling for link fields
+            if (key === 'Airtable_Record_ID' && value) {
+              // Link fields need to be arrays of record IDs
+              fields[airtableFieldName] = [value];
+            } else {
+              fields[airtableFieldName] = value;
             }
-          } else if (config.fieldType === 'checkbox') {
-            // Checkbox fields: ensure boolean
-            fields[key] = Boolean(value);
-          } else if (config.fieldType === 'singleSelect') {
-            // Single select fields: only send if value matches existing option
-            const schemaField = caseMasterSchema.fields.find(f => f.id === key);
-            const validOptions = schemaField?.options?.choices?.map(c => c.name) || [];
-            if (value && validOptions.includes(value)) {
-              fields[key] = value;
-            }
-            // Skip invalid options to avoid API error
-          } else if (config.fieldType === 'multipleSelects') {
-            // Multiple selects: filter to only valid options
-            const schemaField = caseMasterSchema.fields.find(f => f.id === key);
-            const validOptions = schemaField?.options?.choices?.map(c => c.name) || [];
-            if (Array.isArray(value)) {
-              const validValues = value.filter(v => validOptions.includes(v));
-              if (validValues.length > 0) {
-                fields[key] = validValues;
+            return;
+          }
+
+          // Also try schema-mapped fields (keyed by field ID)
+          if (validFieldIds.has(key)) {
+            const config = phase2FieldMapping.outputFields[key];
+            if (!config || !config.enabled) return;
+
+            // Handle special field types based on Airtable field type
+            if (config.fieldType === 'multipleRecordLinks') {
+              if (Array.isArray(value) && value.length > 0 && value[0]) {
+                fields[key] = value;
               }
-            } else if (value && validOptions.includes(value)) {
-              fields[key] = [value];
+            } else if (config.fieldType === 'checkbox') {
+              fields[key] = Boolean(value);
+            } else if (config.fieldType === 'singleSelect') {
+              const schemaField = caseMasterSchema.fields.find(f => f.id === key);
+              const validOptions = schemaField?.options?.choices?.map(c => c.name) || [];
+              if (value && validOptions.includes(value)) {
+                fields[key] = value;
+              }
+            } else if (config.fieldType === 'multipleSelects') {
+              const schemaField = caseMasterSchema.fields.find(f => f.id === key);
+              const validOptions = schemaField?.options?.choices?.map(c => c.name) || [];
+              if (Array.isArray(value)) {
+                const validValues = value.filter(v => validOptions.includes(v));
+                if (validValues.length > 0) {
+                  fields[key] = validValues;
+                }
+              } else if (value && validOptions.includes(value)) {
+                fields[key] = [value];
+              }
+            } else {
+              fields[key] = value;
             }
-          } else if (value !== undefined && value !== null && value !== '') {
-            // Other fields: include as-is
-            fields[key] = value;
           }
         });
+
+        // Debug: Log first record's fields being sent
+        if (i === 0 && recIdx === 0) {
+          const fieldList = Object.entries(fields).map(([k, v]) => `${k}=${typeof v === 'string' ? v.slice(0, 20) : JSON.stringify(v)}`).join(', ');
+          addPhase2Log(`First record fields being sent: ${fieldList.slice(0, 200)}...`, 'info');
+        }
 
         return { fields };
       });
