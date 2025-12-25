@@ -3177,6 +3177,21 @@ function ClioAirtableMerger() {
       outputRecord['_displayNumber'] = matter.displayNumber;
       outputRecord['_client_record_id'] = clientRecordId || ''; // Debug: always include for visibility
 
+      // ALWAYS include all Clio matter data (regardless of schema mappings)
+      // This ensures CSV download has complete data even if Airtable schema isn't fetched
+      outputRecord['Matter_ID'] = matter.matterId;
+      outputRecord['Display_Number'] = matter.displayNumber;
+      outputRecord['Client_Name'] = matter.clientName;
+      outputRecord['Client_ID'] = matter.clientId;
+      outputRecord['Description'] = matter.description;
+      outputRecord['Status'] = matter.status;
+      outputRecord['Mapped_Status'] = mappedStatus;
+      outputRecord['Open_Date'] = matter.openDate;
+      outputRecord['Close_Date'] = matter.closeDate;
+      outputRecord['Notes'] = formattedNotes;
+      outputRecord['Note_Count'] = sortedNotes.length;
+      outputRecord['Airtable_Record_ID'] = clientRecordId || '';
+
       caseMasterOutput.push(outputRecord);
     });
 
@@ -5093,13 +5108,12 @@ function ClioAirtableMerger() {
                       <button
                         className="btn btn-primary"
                         onClick={() => {
-                          const headers = Object.entries(phase2FieldMapping.outputFields)
-                            .filter(([, config]) => config.enabled)
-                            .map(([, config]) => config.fieldName);
-                          if (phase2FieldMapping.includeInternalFields) {
-                            headers.push('_client_name', '_note_count');
-                          }
-                          downloadCSV(phase2Result.caseMaster, 'case_master_views.csv', headers);
+                          // Core merged fields - always available regardless of schema
+                          const coreHeaders = [
+                            'Display_Number', 'Client_Name', 'Description', 'Status', 'Mapped_Status',
+                            'Open_Date', 'Close_Date', 'Notes', 'Note_Count', 'Airtable_Record_ID', 'Matter_ID', 'Client_ID'
+                          ];
+                          downloadCSV(phase2Result.caseMaster, 'case_master_views.csv', coreHeaders);
                         }}
                         style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}
                       >
@@ -5108,20 +5122,18 @@ function ClioAirtableMerger() {
                       <button
                         className="btn btn-secondary"
                         onClick={() => {
-                          // Download with all fields including internal ones
-                          const headers = Object.entries(phase2FieldMapping.outputFields)
-                            .filter(([, config]) => config.enabled)
-                            .map(([, config]) => config.fieldName);
-                          headers.push('_client_name', '_note_count');
-                          downloadCSV(phase2Result.caseMaster, 'case_master_views_full.csv', headers);
+                          // All fields including schema-mapped ones
+                          const firstRecord = phase2Result.caseMaster[0] || {};
+                          const allHeaders = Object.keys(firstRecord).filter(k => !k.startsWith('_'));
+                          downloadCSV(phase2Result.caseMaster, 'case_master_views_full.csv', allHeaders);
                         }}
                         style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}
                       >
-                        <span>⬇</span> Download with Internal Fields
+                        <span>⬇</span> Download All Fields
                       </button>
                     </div>
                     <p style={{ fontSize: '0.7rem', color: '#71717a', marginTop: '0.75rem', marginBottom: 0 }}>
-                      Includes: {Object.entries(phase2FieldMapping.outputFields).filter(([, config]) => config.enabled).map(([, config]) => config.fieldName).join(', ')}
+                      Merged data: Matter info + Notes + Airtable Record ID for client linking
                     </p>
                   </div>
 
@@ -5131,21 +5143,27 @@ function ClioAirtableMerger() {
                         <tr>
                           <th>Matter</th>
                           <th>Client</th>
-                          <th>Airtable Record ID</th>
+                          <th>Status</th>
+                          <th>Description</th>
+                          <th>Airtable Link</th>
                           <th>Notes</th>
                         </tr>
                       </thead>
                       <tbody>
                         {phase2Result.caseMaster.slice(0, 10).map((row, i) => {
-                          const recordId = row['_client_record_id'];
+                          const recordId = row['Airtable_Record_ID'] || row['_client_record_id'];
                           return (
                             <tr key={i}>
-                              <td style={{ fontFamily: 'monospace' }}>{row['_displayNumber'] || '—'}</td>
-                              <td>{row['_client_name']?.slice(0, 20) || '—'}</td>
-                              <td style={{ fontFamily: 'monospace', color: recordId ? '#4ade80' : '#f59e0b' }}>
-                                {recordId || '(no match)'}
+                              <td style={{ fontFamily: 'monospace' }}>{row['Display_Number'] || row['_displayNumber'] || '—'}</td>
+                              <td>{(row['Client_Name'] || row['_client_name'])?.slice(0, 18) || '—'}</td>
+                              <td style={{ fontSize: '0.75rem' }}>{row['Mapped_Status'] || row['Status'] || '—'}</td>
+                              <td style={{ fontSize: '0.75rem', maxWidth: '150px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                {row['Description']?.slice(0, 30) || '—'}
                               </td>
-                              <td>{row['_note_count']} notes</td>
+                              <td style={{ fontFamily: 'monospace', fontSize: '0.7rem', color: recordId ? '#4ade80' : '#f59e0b' }}>
+                                {recordId ? `✓ ${recordId.slice(0, 10)}...` : '(no match)'}
+                              </td>
+                              <td>{row['Note_Count'] || row['_note_count']} notes</td>
                             </tr>
                           );
                         })}
