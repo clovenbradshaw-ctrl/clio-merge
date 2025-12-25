@@ -2927,10 +2927,21 @@ function ClioAirtableMerger() {
     const reports = [];
 
     // Build clio_contact_id -> Airtable Record ID lookup from Airtable export
+    // Also store full client data for merging
     const clioContactToRecordId = new Map();
+    const clioContactToClientData = new Map(); // NEW: Store full client data
     const clientIdToRecordId = new Map();
 
+    // Track available Airtable client fields for merging
+    let airtableClientFields = [];
+
     if (phase2Data.airtableClients?.rows) {
+      // Get all field names from first row for reference
+      if (phase2Data.airtableClients.rows.length > 0) {
+        airtableClientFields = Object.keys(phase2Data.airtableClients.rows[0]);
+        reports.push({ type: 'info', message: `Airtable client fields available: ${airtableClientFields.length} fields` });
+      }
+
       phase2Data.airtableClients.rows.forEach((row) => {
         const recordId = row['Record ID'] || row['recordId'] || row['Airtable Record ID'] || '';
         const clioContactId = String(row['clio_contact_id'] || '').trim();
@@ -2938,6 +2949,8 @@ function ClioAirtableMerger() {
 
         if (clioContactId && recordId) {
           clioContactToRecordId.set(clioContactId, recordId);
+          // Store full client data for merging
+          clioContactToClientData.set(clioContactId, row);
         }
         if (clientId && recordId) {
           clientIdToRecordId.set(String(clientId).trim(), recordId);
@@ -3046,6 +3059,8 @@ function ClioAirtableMerger() {
     mattersLookup.forEach((matter) => {
       // Find Airtable Record ID for this client
       const clientRecordId = clioContactToRecordId.get(matter.clientId) || '';
+      // Get full Airtable client data for merging
+      const airtableClientData = clioContactToClientData.get(matter.clientId) || {};
 
       if (clientRecordId) {
         linkedCount++;
@@ -3152,7 +3167,9 @@ function ClioAirtableMerger() {
                 creator: note.creator
               })),
               noteCount: sortedNotes.length,
-              clientRecordId: clientRecordId || null
+              clientRecordId: clientRecordId || null,
+              // Include Airtable client data in flatpack
+              airtableClient: airtableClientData || null
             };
             value = JSON.stringify(matterFlatpackData);
             break;
@@ -3177,10 +3194,35 @@ function ClioAirtableMerger() {
       outputRecord['_displayNumber'] = matter.displayNumber;
       outputRecord['_client_record_id'] = clientRecordId || ''; // Debug: always include for visibility
 
+      // MERGE: Add all Airtable client data fields to the output record
+      // Prefix with 'Client_' to distinguish from Clio matter fields
+      Object.entries(airtableClientData).forEach(([fieldName, value]) => {
+        // Skip internal Airtable fields and already-mapped fields
+        if (fieldName === 'Record ID' || fieldName === 'recordId' || fieldName === 'Airtable Record ID') return;
+        if (fieldName === 'clio_contact_id') return; // Already used for matching
+
+        // Add with prefix for CSV clarity
+        const prefixedName = `Client_${fieldName}`;
+        outputRecord[prefixedName] = value || '';
+      });
+
+      // Also add key Airtable client fields directly (without prefix) for easy access
+      outputRecord['Airtable_Client_Name'] = airtableClientData['Name'] || airtableClientData['Client Name'] || '';
+      outputRecord['Airtable_A#'] = airtableClientData['A#'] || airtableClientData['Alien Number'] || '';
+      outputRecord['Airtable_Email'] = airtableClientData['Email'] || '';
+      outputRecord['Airtable_Phone'] = airtableClientData['Phone'] || airtableClientData['Phone Number'] || '';
+      outputRecord['Airtable_Address'] = airtableClientData['Address'] || '';
+
       caseMasterOutput.push(outputRecord);
     });
 
     reports.push({ type: 'info', message: `Generated ${caseMasterOutput.length} Case Master Views (${linkedCount} linked to Airtable clients, ${unlinkedCount} unlinked)` });
+
+    // Report merged client fields
+    if (linkedCount > 0 && airtableClientFields.length > 0) {
+      const mergedFieldCount = airtableClientFields.length - 2; // Exclude Record ID and clio_contact_id
+      reports.push({ type: 'success', message: `✓ Merged ${mergedFieldCount} Airtable client fields into ${linkedCount} linked records` });
+    }
 
     // Build matching stats for test UI
     const matchingStats = {
@@ -5093,9 +5135,16 @@ function ClioAirtableMerger() {
                       <button
                         className="btn btn-primary"
                         onClick={() => {
-                          const headers = Object.entries(phase2FieldMapping.outputFields)
+                          // Get all unique keys from the first record to capture merged client fields
+                          const firstRecord = phase2Result.caseMaster[0] || {};
+                          const allKeys = Object.keys(firstRecord).filter(k => !k.startsWith('_'));
+                          // Prioritize enabled output fields, then add merged client fields
+                          const enabledHeaders = Object.entries(phase2FieldMapping.outputFields)
                             .filter(([, config]) => config.enabled)
                             .map(([, config]) => config.fieldName);
+                          // Add merged Airtable client fields (Client_ prefixed and Airtable_ prefixed)
+                          const clientFields = allKeys.filter(k => k.startsWith('Client_') || k.startsWith('Airtable_'));
+                          const headers = [...enabledHeaders, ...clientFields];
                           if (phase2FieldMapping.includeInternalFields) {
                             headers.push('_client_name', '_note_count');
                           }
@@ -5108,12 +5157,11 @@ function ClioAirtableMerger() {
                       <button
                         className="btn btn-secondary"
                         onClick={() => {
-                          // Download with all fields including internal ones
-                          const headers = Object.entries(phase2FieldMapping.outputFields)
-                            .filter(([, config]) => config.enabled)
-                            .map(([, config]) => config.fieldName);
-                          headers.push('_client_name', '_note_count');
-                          downloadCSV(phase2Result.caseMaster, 'case_master_views_full.csv', headers);
+                          // Download with ALL fields including internal ones and all merged client data
+                          const firstRecord = phase2Result.caseMaster[0] || {};
+                          const allKeys = Object.keys(firstRecord).filter(k => !k.startsWith('_fieldMapping'));
+                          // Include everything except _fieldMapping
+                          downloadCSV(phase2Result.caseMaster, 'case_master_views_full.csv', allKeys);
                         }}
                         style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}
                       >
@@ -5122,6 +5170,10 @@ function ClioAirtableMerger() {
                     </div>
                     <p style={{ fontSize: '0.7rem', color: '#71717a', marginTop: '0.75rem', marginBottom: 0 }}>
                       Includes: {Object.entries(phase2FieldMapping.outputFields).filter(([, config]) => config.enabled).map(([, config]) => config.fieldName).join(', ')}
+                      {phase2Result.caseMaster[0] && (() => {
+                        const clientFields = Object.keys(phase2Result.caseMaster[0]).filter(k => k.startsWith('Client_') || k.startsWith('Airtable_'));
+                        return clientFields.length > 0 ? ` + ${clientFields.length} merged Airtable client fields` : '';
+                      })()}
                     </p>
                   </div>
 
@@ -5130,20 +5182,30 @@ function ClioAirtableMerger() {
                       <thead>
                         <tr>
                           <th>Matter</th>
-                          <th>Client</th>
-                          <th>Airtable Record ID</th>
+                          <th>Clio Client</th>
+                          <th>Airtable Client</th>
+                          <th>A#</th>
+                          <th>Record ID</th>
                           <th>Notes</th>
                         </tr>
                       </thead>
                       <tbody>
                         {phase2Result.caseMaster.slice(0, 10).map((row, i) => {
                           const recordId = row['_client_record_id'];
+                          const airtableClientName = row['Airtable_Client_Name'] || row['Client_Name'] || '';
+                          const airtableANumber = row['Airtable_A#'] || row['Client_A#'] || '';
                           return (
                             <tr key={i}>
                               <td style={{ fontFamily: 'monospace' }}>{row['_displayNumber'] || '—'}</td>
-                              <td>{row['_client_name']?.slice(0, 20) || '—'}</td>
-                              <td style={{ fontFamily: 'monospace', color: recordId ? '#4ade80' : '#f59e0b' }}>
-                                {recordId || '(no match)'}
+                              <td>{row['_client_name']?.slice(0, 18) || '—'}</td>
+                              <td style={{ color: airtableClientName ? '#4ade80' : '#71717a' }}>
+                                {airtableClientName?.slice(0, 18) || '(not merged)'}
+                              </td>
+                              <td style={{ fontFamily: 'monospace', color: airtableANumber ? '#60a5fa' : '#71717a' }}>
+                                {airtableANumber || '—'}
+                              </td>
+                              <td style={{ fontFamily: 'monospace', fontSize: '0.7rem', color: recordId ? '#4ade80' : '#f59e0b' }}>
+                                {recordId?.slice(0, 12) || '(no match)'}
                               </td>
                               <td>{row['_note_count']} notes</td>
                             </tr>
