@@ -204,7 +204,7 @@ const AIRTABLE_CONFIG = {
       fields: {
         'Client': { type: 'link', required: true },
         'clio_matter_id': { type: 'text', required: false },
-        'PP ID': { type: 'text', required: false },
+        'PP ID': { type: 'text', required: false, computed: true }, // Computed field - ignored during upload
         'Description': { type: 'text', required: false },
         'File Case Status': { type: 'select', required: false },
         'Case Notes': { type: 'longtext', required: false },
@@ -647,6 +647,11 @@ function AirtableSync() {
     const fieldConfig = currentTableConfig.fields;
 
     Object.entries(fieldConfig).forEach(([fieldName, config]) => {
+      // Skip computed fields - they cannot be written to
+      if (config.computed) {
+        return;
+      }
+
       let value = sourceRow[fieldName];
 
       // Apply normalization if specified
