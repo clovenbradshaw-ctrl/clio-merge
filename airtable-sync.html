@@ -200,11 +200,10 @@ const AIRTABLE_CONFIG = {
     },
     caseMaster: {
       name: 'Case Master View',
-      uniqueFields: ['clio_matter_id', 'PP ID'],
+      uniqueFields: ['clio_matter_id'],
       fields: {
         'Client': { type: 'link', required: true },
         'clio_matter_id': { type: 'text', required: false },
-        'PP ID': { type: 'text', required: false },
         'Description': { type: 'text', required: false },
         'File Case Status': { type: 'select', required: false },
         'Case Notes': { type: 'longtext', required: false },
@@ -545,6 +544,7 @@ function AirtableSync() {
   const [sourceData, setSourceData] = useState([]);
   const [existingRecords, setExistingRecords] = useState([]);
   const [syncPreview, setSyncPreview] = useState({ new: [], existing: [], updates: [], errors: [] });
+  const [fieldMappings, setFieldMappings] = useState({}); // sourceField -> airtableField
 
   // UI state
   const [loading, setLoading] = useState(false);
@@ -567,6 +567,32 @@ function AirtableSync() {
       logContainerRef.current.scrollTop = logContainerRef.current.scrollHeight;
     }
   }, [logs]);
+
+  // Auto-detect field mappings when source data changes
+  useEffect(() => {
+    if (sourceData.length === 0) return;
+
+    const sourceFields = Object.keys(sourceData[0] || {});
+    const airtableFields = Object.keys(AIRTABLE_CONFIG.tables[activeTable].fields);
+
+    const newMappings = {};
+    sourceFields.forEach(sourceField => {
+      // Try exact match first
+      if (airtableFields.includes(sourceField)) {
+        newMappings[sourceField] = sourceField;
+      } else {
+        // Try case-insensitive match
+        const match = airtableFields.find(af =>
+          af.toLowerCase() === sourceField.toLowerCase()
+        );
+        if (match) {
+          newMappings[sourceField] = match;
+        }
+      }
+    });
+
+    setFieldMappings(newMappings);
+  }, [sourceData, activeTable]);
 
   const addLog = (message, type = 'info') => {
     const timestamp = new Date().toLocaleTimeString();
@@ -646,8 +672,18 @@ function AirtableSync() {
     const record = {};
     const fieldConfig = currentTableConfig.fields;
 
+    // Build reverse mapping: airtableField -> sourceField
+    const reverseMapping = {};
+    Object.entries(fieldMappings).forEach(([sourceField, airtableField]) => {
+      if (airtableField) {
+        reverseMapping[airtableField] = sourceField;
+      }
+    });
+
     Object.entries(fieldConfig).forEach(([fieldName, config]) => {
-      let value = sourceRow[fieldName];
+      // Use mapping to find source field, fallback to direct match
+      const sourceField = reverseMapping[fieldName] || fieldName;
+      let value = sourceRow[sourceField];
 
       // Apply normalization if specified
       if (value && config.normalize && normalizers[config.normalize]) {
@@ -1154,41 +1190,64 @@ function AirtableSync() {
         <div className="card">
           <h2>Field Mapping for {currentTableConfig.name}</h2>
           <p style={{ color: '#94a3b8', marginBottom: '15px' }}>
-            Unique fields used for deduplication: <strong>{currentTableConfig.uniqueFields.join(', ') || 'None'}</strong>
+            Map your source data fields to Airtable fields. Unique fields for deduplication: <strong>{currentTableConfig.uniqueFields.join(', ') || 'None'}</strong>
           </p>
-          <div className="table-container">
-            <table>
-              <thead>
-                <tr>
-                  <th>Airtable Field</th>
-                  <th>Type</th>
-                  <th>Required</th>
-                  <th>Normalization</th>
-                  <th>Default Value</th>
-                </tr>
-              </thead>
-              <tbody>
-                {Object.entries(currentTableConfig.fields).map(([field, config]) => (
-                  <tr key={field}>
-                    <td style={{ fontWeight: config.required ? 'bold' : 'normal' }}>{field}</td>
-                    <td>
-                      <span className="badge" style={{ background: '#334155' }}>{config.type}</span>
-                    </td>
-                    <td>{config.required ? '✓' : ''}</td>
-                    <td>{config.normalize || '-'}</td>
-                    <td>
-                      {config.defaultValue !== undefined
-                        ? (typeof config.defaultValue === 'boolean'
-                            ? (config.defaultValue ? 'TRUE' : 'FALSE')
-                            : String(config.defaultValue))
-                        : '-'}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
 
+          {sourceData.length === 0 ? (
+            <p style={{ color: '#f59e0b' }}>Upload a file first to configure field mappings.</p>
+          ) : (
+            <div className="table-container">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Source Field (Clio)</th>
+                    <th>Maps To (Airtable)</th>
+                    <th>Type</th>
+                    <th>Normalization</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {Object.keys(sourceData[0] || {}).map(sourceField => {
+                    const mappedTo = fieldMappings[sourceField];
+                    const config = mappedTo ? currentTableConfig.fields[mappedTo] : null;
+                    return (
+                      <tr key={sourceField}>
+                        <td style={{ fontWeight: 'bold' }}>{sourceField}</td>
+                        <td>
+                          <select
+                            value={fieldMappings[sourceField] || ''}
+                            onChange={(e) => setFieldMappings(prev => ({
+                              ...prev,
+                              [sourceField]: e.target.value || undefined
+                            }))}
+                            style={{
+                              background: '#1e293b',
+                              color: '#e2e8f0',
+                              border: '1px solid #334155',
+                              padding: '5px 10px',
+                              borderRadius: '4px',
+                              width: '100%'
+                            }}
+                          >
+                            <option value="">(ignore)</option>
+                            {Object.keys(currentTableConfig.fields).map(af => (
+                              <option key={af} value={af}>{af}</option>
+                            ))}
+                          </select>
+                        </td>
+                        <td>
+                          {config ? (
+                            <span className="badge" style={{ background: '#334155' }}>{config.type}</span>
+                          ) : '-'}
+                        </td>
+                        <td>{config?.normalize || '-'}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
         </div>
       )}
 
