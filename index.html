@@ -43,7 +43,7 @@ const XANO_CASE_NOTES_ENDPOINT = 'https://xvkq-pq7i-idtl.n7d.xano.io/api:l_gEBOG
 // Relevant Airtable tables for schema inspection
 const AIRTABLE_TABLES = {
   'Client Info': ['Client ID', 'A#', 'First Name', 'Middle Name', 'Family Name', 'Phone Number', 'Client Email', 'Address Line 1', 'Address Line 2', 'City', 'State', 'Zip (5)', 'Country', 'Entry Date', 'Place of Entry', 'DOB', 'clio_contact_id', 'Bahr Client', 'uscis_flatpack_data'],
-  'Case Master View': ['Client', 'clio_matter_id', 'PP ID', 'Description', 'File Case Status', 'Case Notes', 'Bahr Client', 'Matter_Flatpack'],
+  'Case Master View': ['Client', 'clio_matter_id', 'Description', 'File Case Status', 'Case Notes', 'Bahr Client', 'Matter_Flatpack'], // PP ID removed - it's a computed field
   'Events': ['Case Master', 'A#', 'Hearing Date/Time', 'Event Type', 'Event Hearing Type', 'Court', 'Judge', 'MCH Attny', 'Bahr Client'],
   'Relationships': ['Case Master View', 'Object Client', 'Relationship', 'Bahr Client'],
 };
@@ -1639,12 +1639,18 @@ function ClioAirtableMerger() {
         throw new Error(`Table ${CASE_MASTER_VIEW_TABLE_ID} not found in base`);
       }
 
-      const fields = caseMasterTable.fields.map(f => ({
+      // Filter out computed field types that cannot be written to
+      const COMPUTED_FIELD_TYPES = ['formula', 'rollup', 'lookup', 'count', 'autoNumber', 'createdTime', 'lastModifiedTime', 'createdBy', 'lastModifiedBy'];
+
+      const allFields = caseMasterTable.fields.map(f => ({
         id: f.id,
         name: f.name,
         type: f.type,
         options: f.options || null,
       }));
+
+      const fields = allFields.filter(f => !COMPUTED_FIELD_TYPES.includes(f.type));
+      const skippedCount = allFields.length - fields.length;
 
       setCaseMasterSchema({
         loading: false,
@@ -1654,9 +1660,9 @@ function ClioAirtableMerger() {
       });
 
       // Initialize field mappings from schema with smart defaults
+      // Note: PP ID is a computed field and is automatically excluded from the schema
       const defaultInputMappings = {
         'clio_matter_id': 'UniqueId',
-        'PP ID': 'DisplayNumber',
         'Description': 'Description',
         'File Case Status': '_mapped_status',
         'Case Notes': '_aggregated_notes',
@@ -1682,7 +1688,7 @@ function ClioAirtableMerger() {
         outputFields,
       }));
 
-      addPhase2Log(`Loaded schema: ${fields.length} fields from Case Master View table`, 'success');
+      addPhase2Log(`Loaded schema: ${fields.length} writable fields from Case Master View table (${skippedCount} computed fields excluded)`, 'success');
 
     } catch (err) {
       setCaseMasterSchema(prev => ({
@@ -3433,8 +3439,8 @@ function ClioAirtableMerger() {
     const fieldIdToName = new Map(caseMasterSchema.fields.map(f => [f.id, f.name]));
 
     // Build mapping from our output field names to Airtable field names
+    // Note: Display_Number -> PP ID mapping removed since PP ID is a computed field
     const ourFieldToAirtable = {
-      'Display_Number': 'PP ID',
       'Client_Name': 'Client Name',
       'Matter_ID': 'clio_matter_id',
       'Description': 'Description',
