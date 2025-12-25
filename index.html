@@ -1822,6 +1822,63 @@ function ClioAirtableMerger() {
     reader.readAsText(file);
   };
 
+  // Clear uploaded file handlers
+  const clearBahrFile = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setBahrExcelFile(null);
+    setBahrSheets([]);
+    setBahrMergedClients([]);
+    setBahrParseReport([]);
+    setBahrSelectedClient(null);
+  };
+
+  const clearOfficeCasesFile = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setOfficeCasesFile(null);
+    setOfficeCasesSheets([]);
+    setOfficeCasesMergedClients([]);
+    setOfficeCasesParseReport([]);
+  };
+
+  const clearDocketWiseFile = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setDocketWiseFile(null);
+    setDocketWiseSheets([]);
+    setDocketWiseRecords([]);
+    setDocketWiseParseReport([]);
+  };
+
+  const clearPhase1File = (type) => (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setPhase1Files(prev => ({ ...prev, [type]: null }));
+    setPhase1Data(prev => ({ ...prev, [type]: null }));
+  };
+
+  const clearPhase2File = (type) => (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setPhase2Files(prev => ({ ...prev, [type]: null }));
+    setPhase2Data(prev => ({ ...prev, [type]: null }));
+  };
+
+  const clearPhase3File = (type) => (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setPhase3Files(prev => ({ ...prev, [type]: null }));
+    setPhase3Data(prev => ({ ...prev, [type]: null }));
+  };
+
+  const clearPhase4File = (type) => (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setPhase4Files(prev => ({ ...prev, [type]: null }));
+    setPhase4Data(prev => ({ ...prev, [type]: null }));
+  };
+
   // Handle Bahr Excel file upload
   const handleBahrExcelUpload = (event) => {
     const file = event.target.files[0];
@@ -3977,6 +4034,32 @@ function ClioAirtableMerger() {
           border-color: #22c55e;
           background: rgba(34, 197, 94, 0.1);
         }
+        .upload-zone-wrapper {
+          position: relative;
+        }
+        .file-remove-btn {
+          position: absolute;
+          top: 4px;
+          right: 4px;
+          width: 20px;
+          height: 20px;
+          border-radius: 50%;
+          background: rgba(239, 68, 68, 0.8);
+          color: white;
+          border: none;
+          cursor: pointer;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          font-size: 12px;
+          line-height: 1;
+          transition: all 0.2s;
+          z-index: 10;
+        }
+        .file-remove-btn:hover {
+          background: #ef4444;
+          transform: scale(1.1);
+        }
         .btn {
           padding: 0.75rem 1.5rem;
           border-radius: 8px;
@@ -4098,24 +4181,29 @@ function ClioAirtableMerger() {
                     BAHR Workbook
                     <span className="badge badge-warning">Excel .xlsx</span>
                   </h4>
-                  <label className={`upload-zone ${bahrExcelFile ? 'has-file' : ''}`}>
-                    <input
-                      type="file"
-                      accept=".xlsx,.xls"
-                      onChange={handleBahrExcelUpload}
-                      style={{ display: 'none' }}
-                    />
-                    {bahrExcelFile ? (
-                      <div>
-                        <span style={{ color: '#22c55e' }}>✓</span> {bahrExcelFile.name}
-                        <div style={{ fontSize: '0.75rem', color: '#71717a' }}>
-                          {bahrSheets.length} sheets
-                        </div>
-                      </div>
-                    ) : (
-                      <div style={{ color: '#71717a' }}>Drop Excel file or click to upload</div>
+                  <div className="upload-zone-wrapper">
+                    {bahrExcelFile && (
+                      <button className="file-remove-btn" onClick={clearBahrFile} title="Remove file">×</button>
                     )}
-                  </label>
+                    <label className={`upload-zone ${bahrExcelFile ? 'has-file' : ''}`}>
+                      <input
+                        type="file"
+                        accept=".xlsx,.xls"
+                        onChange={handleBahrExcelUpload}
+                        style={{ display: 'none' }}
+                      />
+                      {bahrExcelFile ? (
+                        <div>
+                          <span style={{ color: '#22c55e' }}>✓</span> {bahrExcelFile.name}
+                          <div style={{ fontSize: '0.75rem', color: '#71717a' }}>
+                            {bahrSheets.length} sheets
+                          </div>
+                        </div>
+                      ) : (
+                        <div style={{ color: '#71717a' }}>Drop Excel file or click to upload</div>
+                      )}
+                    </label>
+                  </div>
                 </div>
 
                 {/* Office CASES Workbook Upload */}
@@ -4124,24 +4212,29 @@ function ClioAirtableMerger() {
                     Office CASES Workbook
                     <span className="badge badge-info">Excel .xlsx</span>
                   </h4>
-                  <label className={`upload-zone ${officeCasesFile ? 'has-file' : ''}`}>
-                    <input
-                      type="file"
-                      accept=".xlsx,.xls"
-                      onChange={handleOfficeCasesUpload}
-                      style={{ display: 'none' }}
-                    />
-                    {officeCasesFile ? (
-                      <div>
-                        <span style={{ color: '#22c55e' }}>✓</span> {officeCasesFile.name}
-                        <div style={{ fontSize: '0.75rem', color: '#71717a' }}>
-                          {officeCasesSheets.length} sheets
-                        </div>
-                      </div>
-                    ) : (
-                      <div style={{ color: '#71717a' }}>Drop Excel file or click to upload</div>
+                  <div className="upload-zone-wrapper">
+                    {officeCasesFile && (
+                      <button className="file-remove-btn" onClick={clearOfficeCasesFile} title="Remove file">×</button>
                     )}
-                  </label>
+                    <label className={`upload-zone ${officeCasesFile ? 'has-file' : ''}`}>
+                      <input
+                        type="file"
+                        accept=".xlsx,.xls"
+                        onChange={handleOfficeCasesUpload}
+                        style={{ display: 'none' }}
+                      />
+                      {officeCasesFile ? (
+                        <div>
+                          <span style={{ color: '#22c55e' }}>✓</span> {officeCasesFile.name}
+                          <div style={{ fontSize: '0.75rem', color: '#71717a' }}>
+                            {officeCasesSheets.length} sheets
+                          </div>
+                        </div>
+                      ) : (
+                        <div style={{ color: '#71717a' }}>Drop Excel file or click to upload</div>
+                      )}
+                    </label>
+                  </div>
                 </div>
 
                 {/* DocketWise Upload */}
@@ -4150,24 +4243,29 @@ function ClioAirtableMerger() {
                     DocketWise Export
                     <span className="badge badge-success">CSV/Excel</span>
                   </h4>
-                  <label className={`upload-zone ${docketWiseFile ? 'has-file' : ''}`}>
-                    <input
-                      type="file"
-                      accept=".csv,.xlsx,.xls"
-                      onChange={handleDocketWiseUpload}
-                      style={{ display: 'none' }}
-                    />
-                    {docketWiseFile ? (
-                      <div>
-                        <span style={{ color: '#22c55e' }}>✓</span> {docketWiseFile.name}
-                        <div style={{ fontSize: '0.75rem', color: '#71717a' }}>
-                          {docketWiseSheets.length} sheet{docketWiseSheets.length !== 1 ? 's' : ''}, {docketWiseRecords.length} clients
-                        </div>
-                      </div>
-                    ) : (
-                      <div style={{ color: '#71717a' }}>Drop CSV/Excel or click to upload</div>
+                  <div className="upload-zone-wrapper">
+                    {docketWiseFile && (
+                      <button className="file-remove-btn" onClick={clearDocketWiseFile} title="Remove file">×</button>
                     )}
-                  </label>
+                    <label className={`upload-zone ${docketWiseFile ? 'has-file' : ''}`}>
+                      <input
+                        type="file"
+                        accept=".csv,.xlsx,.xls"
+                        onChange={handleDocketWiseUpload}
+                        style={{ display: 'none' }}
+                      />
+                      {docketWiseFile ? (
+                        <div>
+                          <span style={{ color: '#22c55e' }}>✓</span> {docketWiseFile.name}
+                          <div style={{ fontSize: '0.75rem', color: '#71717a' }}>
+                            {docketWiseSheets.length} sheet{docketWiseSheets.length !== 1 ? 's' : ''}, {docketWiseRecords.length} clients
+                          </div>
+                        </div>
+                      ) : (
+                        <div style={{ color: '#71717a' }}>Drop CSV/Excel or click to upload</div>
+                      )}
+                    </label>
+                  </div>
                 </div>
               </div>
 
@@ -4486,17 +4584,22 @@ function ClioAirtableMerger() {
                     <span className="badge badge-info">Optional</span>
                   </h4>
                   <p style={{ fontSize: '0.75rem', color: '#71717a', marginBottom: '0.5rem' }}>UniqueId, phone, email enrichment</p>
-                  <label className={`upload-zone ${phase1Files.clioContacts ? 'has-file' : ''}`}>
-                    <input type="file" accept=".csv" onChange={handleFileUpload(1, 'clioContacts')} style={{ display: 'none' }} />
-                    {phase1Files.clioContacts ? (
-                      <div>
-                        <span style={{ color: '#22c55e' }}>✓</span> {phase1Files.clioContacts.name}
-                        <div style={{ fontSize: '0.75rem', color: '#71717a' }}>{phase1Data.clioContacts?.rows?.length || 0} rows</div>
-                      </div>
-                    ) : (
-                      <div style={{ color: '#71717a' }}>Drop CSV or click to upload</div>
+                  <div className="upload-zone-wrapper">
+                    {phase1Files.clioContacts && (
+                      <button className="file-remove-btn" onClick={clearPhase1File('clioContacts')} title="Remove file">×</button>
                     )}
-                  </label>
+                    <label className={`upload-zone ${phase1Files.clioContacts ? 'has-file' : ''}`}>
+                      <input type="file" accept=".csv" onChange={handleFileUpload(1, 'clioContacts')} style={{ display: 'none' }} />
+                      {phase1Files.clioContacts ? (
+                        <div>
+                          <span style={{ color: '#22c55e' }}>✓</span> {phase1Files.clioContacts.name}
+                          <div style={{ fontSize: '0.75rem', color: '#71717a' }}>{phase1Data.clioContacts?.rows?.length || 0} rows</div>
+                        </div>
+                      ) : (
+                        <div style={{ color: '#71717a' }}>Drop CSV or click to upload</div>
+                      )}
+                    </label>
+                  </div>
                 </div>
               </div>
 
@@ -4938,17 +5041,22 @@ function ClioAirtableMerger() {
                       {required && <span className="badge badge-warning">Required</span>}
                     </h4>
                     <p style={{ fontSize: '0.75rem', color: '#71717a', marginBottom: '0.5rem' }}>{desc}</p>
-                    <label className={`upload-zone ${phase2Files[key] ? 'has-file' : ''}`}>
-                      <input type="file" accept=".csv" onChange={handleFileUpload(2, key)} style={{ display: 'none' }} />
-                      {phase2Files[key] ? (
-                        <div>
-                          <span style={{ color: '#22c55e' }}>✓</span> {phase2Files[key].name}
-                          <div style={{ fontSize: '0.75rem', color: '#71717a' }}>{phase2Data[key]?.rows?.length || 0} rows</div>
-                        </div>
-                      ) : (
-                        <div style={{ color: '#71717a' }}>Drop CSV or click</div>
+                    <div className="upload-zone-wrapper">
+                      {phase2Files[key] && (
+                        <button className="file-remove-btn" onClick={clearPhase2File(key)} title="Remove file">×</button>
                       )}
-                    </label>
+                      <label className={`upload-zone ${phase2Files[key] ? 'has-file' : ''}`}>
+                        <input type="file" accept=".csv" onChange={handleFileUpload(2, key)} style={{ display: 'none' }} />
+                        {phase2Files[key] ? (
+                          <div>
+                            <span style={{ color: '#22c55e' }}>✓</span> {phase2Files[key].name}
+                            <div style={{ fontSize: '0.75rem', color: '#71717a' }}>{phase2Data[key]?.rows?.length || 0} rows</div>
+                          </div>
+                        ) : (
+                          <div style={{ color: '#71717a' }}>Drop CSV or click</div>
+                        )}
+                      </label>
+                    </div>
                   </div>
                 ))}
               </div>
@@ -5564,17 +5672,22 @@ function ClioAirtableMerger() {
                       {required && <span className="badge badge-warning">Required</span>}
                     </h4>
                     <p style={{ fontSize: '0.75rem', color: '#71717a', marginBottom: '0.5rem' }}>{desc}</p>
-                    <label className={`upload-zone ${phase3Files[key] ? 'has-file' : ''}`}>
-                      <input type="file" accept=".csv" onChange={handleFileUpload(3, key)} style={{ display: 'none' }} />
-                      {phase3Files[key] ? (
-                        <div>
-                          <span style={{ color: '#22c55e' }}>✓</span> {phase3Files[key].name}
-                          <div style={{ fontSize: '0.75rem', color: '#71717a' }}>{phase3Data[key]?.rows?.length || 0} rows</div>
-                        </div>
-                      ) : (
-                        <div style={{ color: '#71717a' }}>Drop CSV or click</div>
+                    <div className="upload-zone-wrapper">
+                      {phase3Files[key] && (
+                        <button className="file-remove-btn" onClick={clearPhase3File(key)} title="Remove file">×</button>
                       )}
-                    </label>
+                      <label className={`upload-zone ${phase3Files[key] ? 'has-file' : ''}`}>
+                        <input type="file" accept=".csv" onChange={handleFileUpload(3, key)} style={{ display: 'none' }} />
+                        {phase3Files[key] ? (
+                          <div>
+                            <span style={{ color: '#22c55e' }}>✓</span> {phase3Files[key].name}
+                            <div style={{ fontSize: '0.75rem', color: '#71717a' }}>{phase3Data[key]?.rows?.length || 0} rows</div>
+                          </div>
+                        ) : (
+                          <div style={{ color: '#71717a' }}>Drop CSV or click</div>
+                        )}
+                      </label>
+                    </div>
                   </div>
                 ))}
               </div>
@@ -5807,22 +5920,20 @@ function ClioAirtableMerger() {
                     Airtable Client Export <span className="badge badge-warning">Required</span>
                   </h4>
                   <p style={{ fontSize: '0.75rem', color: '#71717a', marginBottom: '0.5rem' }}>Record ID + clio_contact_id</p>
-                  <div
-                    className="file-drop"
-                    onClick={() => document.getElementById('phase4-airtable-clients').click()}
-                  >
-                    {phase4Files.airtableClients ? (
-                      <span style={{ color: '#4ade80' }}>{phase4Files.airtableClients.name}</span>
-                    ) : (
-                      'Drop CSV or click'
+                  <div className="upload-zone-wrapper">
+                    {phase4Files.airtableClients && (
+                      <button className="file-remove-btn" onClick={clearPhase4File('airtableClients')} title="Remove file">×</button>
                     )}
-                    <input
-                      id="phase4-airtable-clients"
-                      type="file"
-                      accept=".csv"
-                      style={{ display: 'none' }}
-                      onChange={handleFileUpload(4, 'airtableClients')}
-                    />
+                    <label className={`upload-zone ${phase4Files.airtableClients ? 'has-file' : ''}`}>
+                      <input type="file" accept=".csv" onChange={handleFileUpload(4, 'airtableClients')} style={{ display: 'none' }} />
+                      {phase4Files.airtableClients ? (
+                        <div>
+                          <span style={{ color: '#22c55e' }}>✓</span> {phase4Files.airtableClients.name}
+                        </div>
+                      ) : (
+                        <div style={{ color: '#71717a' }}>Drop CSV or click</div>
+                      )}
+                    </label>
                   </div>
                 </div>
 
@@ -5832,22 +5943,20 @@ function ClioAirtableMerger() {
                     Airtable Case Master Export <span className="badge badge-warning">Required</span>
                   </h4>
                   <p style={{ fontSize: '0.75rem', color: '#71717a', marginBottom: '0.5rem' }}>Record ID + clio_matter_id + PP ID</p>
-                  <div
-                    className="file-drop"
-                    onClick={() => document.getElementById('phase4-airtable-casemaster').click()}
-                  >
-                    {phase4Files.airtableCaseMaster ? (
-                      <span style={{ color: '#4ade80' }}>{phase4Files.airtableCaseMaster.name}</span>
-                    ) : (
-                      'Drop CSV or click'
+                  <div className="upload-zone-wrapper">
+                    {phase4Files.airtableCaseMaster && (
+                      <button className="file-remove-btn" onClick={clearPhase4File('airtableCaseMaster')} title="Remove file">×</button>
                     )}
-                    <input
-                      id="phase4-airtable-casemaster"
-                      type="file"
-                      accept=".csv"
-                      style={{ display: 'none' }}
-                      onChange={handleFileUpload(4, 'airtableCaseMaster')}
-                    />
+                    <label className={`upload-zone ${phase4Files.airtableCaseMaster ? 'has-file' : ''}`}>
+                      <input type="file" accept=".csv" onChange={handleFileUpload(4, 'airtableCaseMaster')} style={{ display: 'none' }} />
+                      {phase4Files.airtableCaseMaster ? (
+                        <div>
+                          <span style={{ color: '#22c55e' }}>✓</span> {phase4Files.airtableCaseMaster.name}
+                        </div>
+                      ) : (
+                        <div style={{ color: '#71717a' }}>Drop CSV or click</div>
+                      )}
+                    </label>
                   </div>
                 </div>
 
@@ -5857,22 +5966,20 @@ function ClioAirtableMerger() {
                     Clio Notes Export <span className="badge badge-warning">Required</span>
                   </h4>
                   <p style={{ fontSize: '0.75rem', color: '#71717a', marginBottom: '0.5rem' }}>MatterId, Subject, Detail, Date, Creator</p>
-                  <div
-                    className="file-drop"
-                    onClick={() => document.getElementById('phase4-clio-notes').click()}
-                  >
-                    {phase4Files.clioNotes ? (
-                      <span style={{ color: '#4ade80' }}>{phase4Files.clioNotes.name}</span>
-                    ) : (
-                      'Drop CSV or click'
+                  <div className="upload-zone-wrapper">
+                    {phase4Files.clioNotes && (
+                      <button className="file-remove-btn" onClick={clearPhase4File('clioNotes')} title="Remove file">×</button>
                     )}
-                    <input
-                      id="phase4-clio-notes"
-                      type="file"
-                      accept=".csv"
-                      style={{ display: 'none' }}
-                      onChange={handleFileUpload(4, 'clioNotes')}
-                    />
+                    <label className={`upload-zone ${phase4Files.clioNotes ? 'has-file' : ''}`}>
+                      <input type="file" accept=".csv" onChange={handleFileUpload(4, 'clioNotes')} style={{ display: 'none' }} />
+                      {phase4Files.clioNotes ? (
+                        <div>
+                          <span style={{ color: '#22c55e' }}>✓</span> {phase4Files.clioNotes.name}
+                        </div>
+                      ) : (
+                        <div style={{ color: '#71717a' }}>Drop CSV or click</div>
+                      )}
+                    </label>
                   </div>
                 </div>
               </div>
