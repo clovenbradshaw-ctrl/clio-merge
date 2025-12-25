@@ -3040,9 +3040,66 @@ function ClioAirtableMerger() {
     let notesMatched = 0;
     let notesUnmatched = 0;
 
+    // Try multiple possible field names for matter ID in notes
+    const NOTE_MATTER_ID_FIELDS = ['MatterId', 'Matter.id', 'Matter ID', 'matter_id', 'UniqueId', 'Matter'];
+    let detectedNoteMatterIdField = null;
+    let clioNotesColumns = [];
+
     if (phase2Data.clioNotes?.rows) {
+      // First, detect which field name is being used for the matter ID in notes
+      const sampleNoteRow = phase2Data.clioNotes.rows[0];
+      if (sampleNoteRow) {
+        clioNotesColumns = Object.keys(sampleNoteRow);
+        reports.push({ type: 'info', message: `Clio Notes columns: ${clioNotesColumns.join(', ')}` });
+
+        // Find the first matching field name that has values matching matters
+        for (const fieldName of NOTE_MATTER_ID_FIELDS) {
+          if (clioNotesColumns.includes(fieldName)) {
+            // Check if this field has values that match matter IDs
+            const hasMatchingValues = phase2Data.clioNotes.rows.some(row => {
+              const noteId = String(row[fieldName] || '').trim();
+              return noteId && mattersLookup.has(noteId);
+            });
+            if (hasMatchingValues) {
+              detectedNoteMatterIdField = fieldName;
+              reports.push({ type: 'info', message: `Using field "${fieldName}" for note-to-matter matching` });
+              break;
+            }
+          }
+        }
+
+        if (!detectedNoteMatterIdField) {
+          // Still try to find a field with values even if no matches
+          for (const fieldName of NOTE_MATTER_ID_FIELDS) {
+            if (clioNotesColumns.includes(fieldName)) {
+              const hasValues = phase2Data.clioNotes.rows.some(row => row[fieldName] && String(row[fieldName]).trim());
+              if (hasValues) {
+                detectedNoteMatterIdField = fieldName;
+                reports.push({ type: 'warning', message: `Using field "${fieldName}" for notes but no matching matter IDs found` });
+                break;
+              }
+            }
+          }
+        }
+
+        if (!detectedNoteMatterIdField) {
+          reports.push({ type: 'warning', message: `No matter ID field found in Clio Notes. Looked for: ${NOTE_MATTER_ID_FIELDS.join(', ')}` });
+        }
+      }
+
       phase2Data.clioNotes.rows.forEach((row) => {
-        const matterId = row['MatterId'] || '';
+        // Use detected field name or try all possibilities
+        let matterId = '';
+        if (detectedNoteMatterIdField) {
+          matterId = String(row[detectedNoteMatterIdField] || '').trim();
+        } else {
+          for (const fieldName of NOTE_MATTER_ID_FIELDS) {
+            if (row[fieldName]) {
+              matterId = String(row[fieldName]).trim();
+              break;
+            }
+          }
+        }
         const subject = row['Subject'] || '';
         const detail = row['Detail'] || '';
         const date = row['Date'] || row['CreatedAt'] || '';
@@ -3055,7 +3112,15 @@ function ClioAirtableMerger() {
           notesUnmatched++;
         }
       });
-      reports.push({ type: 'info', message: `Matched ${notesMatched} notes, ${notesUnmatched} unmatched` });
+      reports.push({ type: notesMatched > 0 ? 'info' : 'warning', message: `Matched ${notesMatched} notes, ${notesUnmatched} unmatched` });
+
+      // Show sample note matter IDs for debugging
+      if (phase2Data.clioNotes.rows.length > 0 && detectedNoteMatterIdField) {
+        const sampleNoteIds = phase2Data.clioNotes.rows.slice(0, 3).map(r => String(r[detectedNoteMatterIdField] || '').trim());
+        const sampleMatterIds = Array.from(mattersLookup.keys()).slice(0, 3);
+        reports.push({ type: 'info', message: `Sample note ${detectedNoteMatterIdField}: ${sampleNoteIds.map(id => `"${id}"`).join(', ')}` });
+        reports.push({ type: 'info', message: `Sample matter UniqueId: ${sampleMatterIds.map(id => `"${id}"`).join(', ')}` });
+      }
     }
 
     // Build Case Master View output using field mappings
@@ -3254,6 +3319,11 @@ function ClioAirtableMerger() {
       // Detected field name and available columns for debugging
       detectedClioIdField,
       clioMattersColumns,
+      // Notes matching stats
+      notesMatched,
+      notesUnmatched,
+      detectedNoteMatterIdField,
+      clioNotesColumns,
     };
 
     setPhase2Result({ caseMaster: caseMasterOutput, matchingStats });
