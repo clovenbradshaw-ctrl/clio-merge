@@ -300,30 +300,37 @@ class AirtableClient {
     return allRecords;
   }
 
-  async deleteRecords(tableName, recordIds, logCallback = null) {
+  async deleteRecords(tableName, recordIds, recordsInfo = [], logCallback = null) {
     const results = [];
+    const total = recordIds.length;
 
-    // Process in batches of 10
-    for (let i = 0; i < recordIds.length; i += 10) {
-      const batch = recordIds.slice(i, i + 10);
-      const params = batch.map(id => `records[]=${id}`).join('&');
+    // Process one record at a time with verbose logging
+    for (let i = 0; i < recordIds.length; i++) {
+      const recordId = recordIds[i];
+      const recordInfo = recordsInfo[i] || {};
+      const clientName = recordInfo.name || 'Unknown';
+      const score = recordInfo.score || 0;
+
+      if (logCallback) {
+        logCallback(`[${i + 1}/${total}] Deleting: ${clientName} (ID: ${recordId}, Score: ${score})`, 'info');
+      }
 
       try {
-        const result = await this.request(`/${encodeURIComponent(tableName)}?${params}`, {
+        const result = await this.request(`/${encodeURIComponent(tableName)}?records[]=${recordId}`, {
           method: 'DELETE',
         });
         results.push(...result.records);
 
         if (logCallback) {
-          logCallback(`Deleted batch ${Math.floor(i/10) + 1}: ${result.records.length} records`, 'success');
+          logCallback(`[${i + 1}/${total}] ✓ Successfully deleted: ${clientName}`, 'success');
         }
       } catch (err) {
         if (logCallback) {
-          logCallback(`Batch ${Math.floor(i/10) + 1} failed: ${err.message}`, 'error');
+          logCallback(`[${i + 1}/${total}] ✗ Failed to delete ${clientName}: ${err.message}`, 'error');
         }
       }
 
-      // Rate limiting
+      // Rate limiting - 5 requests per second max
       await new Promise(r => setTimeout(r, 250));
     }
 
@@ -779,15 +786,24 @@ function App() {
     }
 
     setLoading(true);
-    addLog(`Starting deletion of ${recordsToDelete.length} records...`, 'warning');
+    addLog(`Starting deletion of ${recordsToDelete.length} records (one at a time)...`, 'warning');
+    addLog(`This will take approximately ${Math.ceil(recordsToDelete.length * 0.3)} seconds`, 'info');
 
     try {
       const client = new AirtableClient(apiKey, baseId);
       const idsToDelete = recordsToDelete.map(dr => dr.record.id);
+      const recordsInfo = recordsToDelete.map(dr => ({
+        name: dr.name,
+        score: dr.score,
+        aNumber: dr.record.fields['A#'] || '',
+      }));
 
-      const results = await client.deleteRecords(CLIENT_INFO_TABLE, idsToDelete, addLog);
+      const results = await client.deleteRecords(CLIENT_INFO_TABLE, idsToDelete, recordsInfo, addLog);
 
-      addLog(`Successfully deleted ${results.length} records`, 'success');
+      addLog(``, 'info');
+      addLog(`========================================`, 'success');
+      addLog(`Deletion complete: ${results.length} of ${recordsToDelete.length} records deleted`, 'success');
+      addLog(`========================================`, 'success');
 
       // Refresh the data
       await fetchAllClients();
