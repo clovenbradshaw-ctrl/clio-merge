@@ -243,10 +243,11 @@ class AirtableClient {
     this.apiKey = apiKey;
     this.baseId = baseId;
     this.baseUrl = `https://api.airtable.com/v0/${baseId}`;
+    this.metaUrl = `https://api.airtable.com/v0/meta/bases/${baseId}/tables`;
   }
 
-  async request(endpoint, options = {}) {
-    const url = `${this.baseUrl}${endpoint}`;
+  async request(endpoint, options = {}, useMetaUrl = false) {
+    const url = useMetaUrl ? endpoint : `${this.baseUrl}${endpoint}`;
     const response = await fetch(url, {
       ...options,
       headers: {
@@ -262,6 +263,56 @@ class AirtableClient {
     }
 
     return response.json();
+  }
+
+  // Fetch table schema to determine writable vs computed fields
+  async getTableSchema(tableName, logCallback = null) {
+    try {
+      const result = await this.request(this.metaUrl, {}, true);
+      const table = result.tables.find(t => t.name === tableName);
+      if (!table) {
+        throw new Error(`Table "${tableName}" not found`);
+      }
+
+      // Categorize fields
+      const schema = {
+        allFields: [],
+        writableFields: [],
+        computedFields: [],
+        linkFields: [],
+        textFields: [],
+      };
+
+      // Computed field types that cannot be written to
+      const computedTypes = ['formula', 'rollup', 'count', 'lookup', 'autoNumber', 'createdTime', 'lastModifiedTime', 'createdBy', 'lastModifiedBy', 'button'];
+
+      table.fields.forEach(field => {
+        schema.allFields.push(field.name);
+
+        if (computedTypes.includes(field.type)) {
+          schema.computedFields.push(field.name);
+        } else {
+          schema.writableFields.push(field.name);
+
+          if (field.type === 'multipleRecordLinks') {
+            schema.linkFields.push(field.name);
+          } else {
+            schema.textFields.push(field.name);
+          }
+        }
+      });
+
+      if (logCallback) {
+        logCallback(`Schema loaded: ${schema.writableFields.length} writable fields, ${schema.computedFields.length} computed fields`, 'success');
+      }
+
+      return schema;
+    } catch (err) {
+      if (logCallback) {
+        logCallback(`Error fetching schema: ${err.message}`, 'error');
+      }
+      throw err;
+    }
   }
 
   async getAllRecords(tableName, fields = [], filterFormula = '', logCallback = null) {
@@ -357,27 +408,22 @@ class AirtableClient {
 // MERGE LOGIC
 // ============================================
 
-// Fields that are link arrays (need to combine unique IDs)
-const LINK_FIELDS = ['Case Master View', 'Events', 'Relationships', 'Client Notes', 'Matters'];
+// Fields to EXCLUDE from merging (Box fields need manual cleanup)
+const BOX_FIELDS = ['Box_Folder_ID', 'box_shared_link', 'Box Legacy ID'];
 
-// Fields that are simple text/values (prefer non-empty)
-const TEXT_FIELDS = [
-  'A#', 'DOB', 'Phone Number', 'Client Email', 'Address', 'Address Line 1',
-  'City', 'State', 'Zip (5)', 'Country', 'Entry Date', 'PPID',
-  'Box_Folder_ID', 'box_shared_link', 'Box Legacy ID', 'clio_contact_id',
-  'Client ID', 'First Name', 'Middle Name', 'Family Name'
-];
-
-// Compute merged fields from keep record + all duplicate records
-const computeMergedFields = (keepRecord, deleteRecords) => {
+// Compute merged fields dynamically using schema
+const computeMergedFields = (keepRecord, deleteRecords, schema) => {
   const mergedFields = {};
+  const mergeLog = [];
   const keepFields = keepRecord.record.fields || {};
-
-  // Start with all records (keep + duplicates)
   const allRecords = [keepRecord, ...deleteRecords];
 
+  // Get writable fields from schema, excluding Box fields
+  const linkFields = schema.linkFields.filter(f => !BOX_FIELDS.includes(f));
+  const textFields = schema.textFields.filter(f => !BOX_FIELDS.includes(f));
+
   // Merge link fields (combine all unique IDs)
-  LINK_FIELDS.forEach(field => {
+  linkFields.forEach(field => {
     const allIds = new Set();
     allRecords.forEach(r => {
       const ids = r.record.fields[field] || [];
@@ -390,33 +436,77 @@ const computeMergedFields = (keepRecord, deleteRecords) => {
     // Only include if there are new IDs to add
     if (mergedIds.length > currentIds.length) {
       mergedFields[field] = mergedIds;
+      const added = mergedIds.length - currentIds.length;
+      mergeLog.push(`${field}: added ${added} link(s)`);
     }
   });
 
   // Merge text fields (prefer non-empty values, keep record takes priority)
-  TEXT_FIELDS.forEach(field => {
+  textFields.forEach(field => {
     const keepValue = keepFields[field];
 
     // If keep record already has a value, don't overwrite
-    if (keepValue && String(keepValue).trim()) {
+    if (keepValue !== undefined && keepValue !== null && String(keepValue).trim()) {
       return;
     }
 
     // Find first non-empty value from duplicates
     for (const dr of deleteRecords) {
       const dupValue = dr.record.fields[field];
-      if (dupValue && String(dupValue).trim()) {
+      if (dupValue !== undefined && dupValue !== null && String(dupValue).trim()) {
         // Skip invalid emails
         if (field === 'Client Email' && String(dupValue).includes('null@blank')) {
           continue;
         }
         mergedFields[field] = dupValue;
+        mergeLog.push(`${field}: filled from duplicate`);
         break;
       }
     }
   });
 
-  return mergedFields;
+  return { mergedFields, mergeLog };
+};
+
+// Build merge note to append to flatpack
+const buildMergeNote = (keepRecord, deleteRecords, mergeLog) => {
+  const timestamp = new Date().toISOString();
+  const deletedIds = deleteRecords.map(dr => dr.record.id);
+
+  return {
+    _merge_event: {
+      timestamp,
+      kept_record_id: keepRecord.record.id,
+      deleted_record_ids: deletedIds,
+      deleted_count: deletedIds.length,
+      fields_merged: mergeLog,
+    }
+  };
+};
+
+// Update flatpack field with merge note
+const updateFlatpackWithMergeNote = (currentFlatpack, mergeNote) => {
+  let flatpackData = {};
+
+  // Parse existing flatpack if present
+  if (currentFlatpack) {
+    try {
+      flatpackData = JSON.parse(currentFlatpack);
+    } catch (e) {
+      // If not valid JSON, wrap it
+      flatpackData = { _original_data: currentFlatpack };
+    }
+  }
+
+  // Add merge history array if not present
+  if (!flatpackData._merge_history) {
+    flatpackData._merge_history = [];
+  }
+
+  // Append the new merge event
+  flatpackData._merge_history.push(mergeNote._merge_event);
+
+  return JSON.stringify(flatpackData);
 };
 
 // ============================================
@@ -539,6 +629,7 @@ function App() {
   const [logs, setLogs] = useState([]);
   const [progress, setProgress] = useState({ current: 0, total: 0, phase: '' });
 
+  const [schema, setSchema] = useState(null);
   const [allRecords, setAllRecords] = useState([]);
   const [duplicateGroups, setDuplicateGroups] = useState([]);
   const [recordsToDelete, setRecordsToDelete] = useState([]);
@@ -588,14 +679,33 @@ function App() {
 
     setLoading(true);
     clearLogs();
-    addLog('Fetching all Bahr clients...', 'info');
-    setProgress({ current: 0, total: 0, phase: 'Fetching records' });
+    setProgress({ current: 0, total: 0, phase: 'Fetching schema' });
 
     try {
       const client = new AirtableClient(apiKey, baseId);
+
+      // Step 1: Fetch schema to determine all fields
+      addLog('Fetching table schema...', 'info');
+      const tableSchema = await client.getTableSchema(CLIENT_INFO_TABLE, addLog);
+      setSchema(tableSchema);
+
+      addLog(`Link fields: ${tableSchema.linkFields.join(', ')}`, 'info');
+      addLog(`Writable text fields: ${tableSchema.textFields.length} fields`, 'info');
+      addLog(`Computed fields (excluded): ${tableSchema.computedFields.join(', ')}`, 'info');
+
+      // Step 2: Fetch all records with all writable fields (need flatpack for merge notes)
+      setProgress({ current: 0, total: 0, phase: 'Fetching records' });
+      addLog('Fetching all Bahr clients...', 'info');
       const filterFormula = buildBahrFilter();
       addLog(`Filter: ${filterFormula}`, 'info');
-      const records = await client.getAllRecords(CLIENT_INFO_TABLE, FIELDS_TO_FETCH, filterFormula, addLog);
+
+      // Fetch all writable fields plus uscis_flatpack_data for merge notes
+      const fieldsToFetch = [...tableSchema.writableFields];
+      if (!fieldsToFetch.includes('uscis_flatpack_data')) {
+        fieldsToFetch.push('uscis_flatpack_data');
+      }
+
+      const records = await client.getAllRecords(CLIENT_INFO_TABLE, fieldsToFetch, filterFormula, addLog);
 
       setAllRecords(records);
       addLog(`Successfully fetched ${records.length} total client records`, 'success');
@@ -603,7 +713,7 @@ function App() {
       // Automatically find duplicates
       findDuplicates(records);
     } catch (err) {
-      addLog(`Error fetching records: ${err.message}`, 'error');
+      addLog(`Error: ${err.message}`, 'error');
     } finally {
       setLoading(false);
     }
@@ -845,20 +955,20 @@ function App() {
     addLog(`Exported ${ids.length} record IDs to JSON`, 'success');
   };
 
-  // Merge and delete records from Airtable
+  // Merge and delete records from Airtable (bulk operation)
   const mergeAndDeleteRecords = async () => {
     if (duplicateGroups.length === 0) {
       addLog('No duplicate groups to process', 'warning');
       return;
     }
 
-    if (!window.confirm(`This will:\n1. MERGE data from ${recordsToDelete.length} duplicates into ${duplicateGroups.length} kept records\n2. DELETE the ${recordsToDelete.length} duplicate records\n\nThis cannot be undone! Continue?`)) {
+    if (!schema) {
+      addLog('Schema not loaded. Please fetch clients first.', 'error');
       return;
     }
 
-    const confirmation = window.prompt('Type "MERGE" to confirm merge and deletion:');
-    if (confirmation !== 'MERGE') {
-      addLog('Operation cancelled - confirmation not received', 'warning');
+    // Single confirmation for bulk operation
+    if (!window.confirm(`BULK MERGE & DELETE\n\nThis will:\n• Merge all non-computed fields from ${recordsToDelete.length} duplicates into ${duplicateGroups.length} kept records\n• Add merge history to uscis_flatpack_data\n• DELETE ${recordsToDelete.length} duplicate records\n• Box folder links will NOT be merged (require manual cleanup)\n\nThis cannot be undone! Continue?`)) {
       return;
     }
 
@@ -868,51 +978,50 @@ function App() {
     // Phase 1: Merge data into kept records
     addLog(``, 'info');
     addLog(`========================================`, 'info');
-    addLog(`PHASE 1: Merging data into ${duplicateGroups.length} kept records...`, 'info');
+    addLog(`PHASE 1: Merging ${duplicateGroups.length} groups (all non-computed fields)...`, 'info');
     addLog(`========================================`, 'info');
 
     let mergeSuccessCount = 0;
     let mergeErrorCount = 0;
+    let noChangeCount = 0;
 
     for (let i = 0; i < duplicateGroups.length; i++) {
       const group = duplicateGroups[i];
       const keepRecordId = group.keepRecord.record.id;
       const clientName = group.keepRecord.name;
 
-      // Compute merged fields
-      const mergedFields = computeMergedFields(group.keepRecord, group.deleteRecords);
+      // Compute merged fields using schema
+      const { mergedFields, mergeLog } = computeMergedFields(group.keepRecord, group.deleteRecords, schema);
 
-      if (Object.keys(mergedFields).length === 0) {
-        addLog(`[${i + 1}/${duplicateGroups.length}] ${clientName}: No new data to merge`, 'info');
-        continue;
+      // Build merge note for flatpack
+      const mergeNote = buildMergeNote(group.keepRecord, group.deleteRecords, mergeLog);
+
+      // Update flatpack with merge note
+      const currentFlatpack = group.keepRecord.record.fields['uscis_flatpack_data'];
+      const updatedFlatpack = updateFlatpackWithMergeNote(currentFlatpack, mergeNote);
+      mergedFields['uscis_flatpack_data'] = updatedFlatpack;
+
+      if (mergeLog.length === 0) {
+        addLog(`[${i + 1}/${duplicateGroups.length}] ${clientName}: No data changes (adding merge note only)`, 'info');
+        noChangeCount++;
+      } else {
+        addLog(`[${i + 1}/${duplicateGroups.length}] ${clientName}: ${mergeLog.join(', ')}`, 'info');
       }
-
-      // Log what's being merged
-      const fieldsSummary = Object.keys(mergedFields).map(f => {
-        const val = mergedFields[f];
-        if (Array.isArray(val)) {
-          return `${f}: +${val.length - (group.keepRecord.record.fields[f] || []).length} links`;
-        }
-        return f;
-      }).join(', ');
-
-      addLog(`[${i + 1}/${duplicateGroups.length}] Merging into ${clientName}: ${fieldsSummary}`, 'info');
 
       try {
         await client.updateRecord(CLIENT_INFO_TABLE, keepRecordId, mergedFields, addLog);
-        addLog(`[${i + 1}/${duplicateGroups.length}] ✓ Successfully merged: ${clientName}`, 'success');
         mergeSuccessCount++;
       } catch (err) {
-        addLog(`[${i + 1}/${duplicateGroups.length}] ✗ Failed to merge ${clientName}: ${err.message}`, 'error');
+        addLog(`[${i + 1}/${duplicateGroups.length}] ✗ Failed: ${err.message}`, 'error');
         mergeErrorCount++;
       }
 
       // Rate limiting
-      await new Promise(r => setTimeout(r, 250));
+      await new Promise(r => setTimeout(r, 200));
     }
 
     addLog(``, 'info');
-    addLog(`Merge phase complete: ${mergeSuccessCount} successful, ${mergeErrorCount} errors`, mergeErrorCount > 0 ? 'warning' : 'success');
+    addLog(`Merge complete: ${mergeSuccessCount} updated, ${noChangeCount} no changes, ${mergeErrorCount} errors`, mergeErrorCount > 0 ? 'warning' : 'success');
 
     // Phase 2: Delete duplicate records
     addLog(``, 'info');
@@ -931,7 +1040,10 @@ function App() {
 
     addLog(``, 'info');
     addLog(`========================================`, 'success');
-    addLog(`COMPLETE: Merged ${mergeSuccessCount} records, deleted ${results.length} duplicates`, 'success');
+    addLog(`COMPLETE: ${mergeSuccessCount} records merged, ${results.length} duplicates deleted`, 'success');
+    if (boxFoldersToDelete.length > 0) {
+      addLog(`NOTE: ${boxFoldersToDelete.length} Box folders need manual cleanup (see Box Folders tab)`, 'warning');
+    }
     addLog(`========================================`, 'success');
 
     // Refresh the data
@@ -1208,17 +1320,22 @@ function App() {
           </div>
 
           <div style={{ borderTop: '1px solid #475569', paddingTop: '20px' }}>
-            <h3 style={{ color: '#ef4444' }}>Danger Zone</h3>
-            <p style={{ color: '#94a3b8', marginBottom: '15px' }}>
-              This will MERGE all data (Case Master Views, Events, Relationships, Notes, Matters, and text fields)
-              from duplicates into the kept records, then DELETE the duplicates. This cannot be undone.
+            <h3 style={{ color: '#ef4444' }}>Bulk Merge & Delete</h3>
+            <p style={{ color: '#94a3b8', marginBottom: '10px' }}>
+              This will merge ALL non-computed fields (determined by schema) from duplicates into kept records:
             </p>
+            <ul style={{ color: '#94a3b8', marginBottom: '15px', marginLeft: '20px', fontSize: '0.9em' }}>
+              <li>Link fields: Case Master Views, Events, Relationships, Notes, Matters, etc.</li>
+              <li>Text fields: A#, DOB, contact info, addresses, IDs, etc.</li>
+              <li>Adds merge history note to uscis_flatpack_data</li>
+              <li style={{ color: '#f59e0b' }}>Box folder fields are EXCLUDED (require manual cleanup)</li>
+            </ul>
             <button
               className="danger"
               onClick={mergeAndDeleteRecords}
-              disabled={loading || duplicateGroups.length === 0}
+              disabled={loading || duplicateGroups.length === 0 || !schema}
             >
-              Merge & Delete: {duplicateGroups.length} groups ({recordsToDelete.length} duplicates)
+              Bulk Merge & Delete: {duplicateGroups.length} groups ({recordsToDelete.length} duplicates)
             </button>
           </div>
         </div>
