@@ -3042,7 +3042,7 @@ function ClioAirtableMerger() {
     }
   };
 
-  // Fetch existing Case Master View records for deduplication
+  // Fetch existing Case Master View records for deduplication and merging
   const fetchExistingCaseMasterViews = async () => {
     if (!airtableApiKey || !devToolsBaseId) {
       addPhase2Log('Please enter API key and select a Base first', 'error');
@@ -3050,7 +3050,7 @@ function ClioAirtableMerger() {
     }
 
     setPhase2Sync(prev => ({ ...prev, loading: true }));
-    addPhase2Log('Fetching existing Case Master View records for deduplication...', 'info');
+    addPhase2Log('Fetching existing Case Master View records for deduplication and merging...', 'info');
 
     try {
       const allRecords = [];
@@ -3058,10 +3058,7 @@ function ClioAirtableMerger() {
 
       do {
         const params = new URLSearchParams();
-        // Only fetch fields needed for deduplication
-        params.append('fields[]', 'clio_matter_id');
-        params.append('fields[]', 'PP ID');
-        params.append('fields[]', 'Description');
+        // Fetch all fields for merging (no field restrictions)
         if (offset) params.append('offset', offset);
 
         const response = await fetch(
@@ -3098,8 +3095,11 @@ function ClioAirtableMerger() {
       // Log stats
       const withClioId = allRecords.filter(r => r.fields['clio_matter_id']).length;
       const withPPID = allRecords.filter(r => r.fields['PP ID']).length;
-      addPhase2Log(`Total: ${allRecords.length} existing Case Master Views fetched`, 'success');
-      addPhase2Log(`  ${withClioId} with clio_matter_id, ${withPPID} with PP ID`, 'info');
+      const avgFieldCount = allRecords.length > 0
+        ? Math.round(allRecords.reduce((sum, r) => sum + Object.keys(r.fields).length, 0) / allRecords.length)
+        : 0;
+      addPhase2Log(`Total: ${allRecords.length} existing Case Master Views fetched (all fields for merging)`, 'success');
+      addPhase2Log(`  ${withClioId} with clio_matter_id, ${withPPID} with PP ID, avg ${avgFieldCount} fields/record`, 'info');
 
     } catch (err) {
       addPhase2Log(`Error fetching Case Master Views: ${err.message}`, 'error');
@@ -3107,7 +3107,7 @@ function ClioAirtableMerger() {
     }
   };
 
-  // Check for duplicate Case Master Views using clio_matter_id
+  // Check for duplicate Case Master Views using clio_matter_id and compute merged fields
   const checkCaseMasterDuplicates = () => {
     if (!phase2Result?.caseMaster?.length) {
       addPhase2Log('No Case Master Views to check. Generate them first.', 'warning');
@@ -3133,7 +3133,141 @@ function ClioAirtableMerger() {
 
     addPhase2Log(`Built lookup map with ${clioMatterIdLookup.size} unique clio_matter_id values`, 'info');
 
+    // Field mapping from our record fields to Airtable field names
+    const ourFieldToAirtable = {
+      'Matter_ID': 'clio_matter_id',
+      'Description': 'Description',
+      'Notes': 'Case Notes',
+      'Airtable_Record_ID': 'Edit Client Info',
+      'Matter_Flatpack': 'Matter_Flatpack',
+      'Mapped_Status': 'File Case Status',
+    };
+
+    // Helper function to merge fields from new record into existing record
+    const computeMergedFields = (newRecord, existingRecord) => {
+      const mergedFields = {};
+      let fieldsToUpdate = 0;
+
+      // Process each mappable field from our new record
+      Object.entries(ourFieldToAirtable).forEach(([ourField, airtableField]) => {
+        const newValue = newRecord[ourField];
+        const existingValue = existingRecord.fields[airtableField];
+
+        // Skip if no new value
+        if (newValue === undefined || newValue === null || newValue === '') return;
+
+        // Special handling for link fields (Edit Client Info)
+        if (ourField === 'Airtable_Record_ID') {
+          // Link fields are arrays in Airtable
+          const newLinkValue = [newValue];
+          const existingLinks = existingValue || [];
+
+          // Only update if new value differs or existing is empty
+          if (!existingLinks.length || (existingLinks.length > 0 && existingLinks[0] !== newValue)) {
+            mergedFields[airtableField] = newLinkValue;
+            fieldsToUpdate++;
+          }
+          return;
+        }
+
+        // Special handling for Case Notes - merge intelligently
+        if (ourField === 'Notes') {
+          if (!existingValue || existingValue.trim() === '') {
+            // Existing is empty, use new
+            mergedFields[airtableField] = newValue;
+            fieldsToUpdate++;
+          } else if (newValue && newValue.trim() !== '' && newValue !== existingValue) {
+            // Both have values - merge by appending new notes if different
+            // Check if new notes contain content not in existing
+            const existingNotes = existingValue.trim();
+            const newNotes = newValue.trim();
+
+            // Simple merge: if lengths are significantly different, the longer one wins
+            // Or if new notes seem more complete, use them
+            if (newNotes.length > existingNotes.length * 1.1) {
+              mergedFields[airtableField] = newNotes;
+              fieldsToUpdate++;
+            }
+          }
+          return;
+        }
+
+        // Special handling for Matter_Flatpack - prefer new value as it's more current
+        if (ourField === 'Matter_Flatpack') {
+          if (!existingValue || existingValue === '{}' || existingValue === '') {
+            mergedFields[airtableField] = newValue;
+            fieldsToUpdate++;
+          } else {
+            // Try to merge JSON data
+            try {
+              const existingData = JSON.parse(existingValue);
+              const newData = JSON.parse(newValue);
+              // Prefer new data but keep existing if new is empty
+              if (Object.keys(newData).length > Object.keys(existingData).length) {
+                mergedFields[airtableField] = newValue;
+                fieldsToUpdate++;
+              }
+            } catch (e) {
+              // If parse fails, use new value if existing is empty
+              if (!existingValue) {
+                mergedFields[airtableField] = newValue;
+                fieldsToUpdate++;
+              }
+            }
+          }
+          return;
+        }
+
+        // For all other fields: fill in empty values, or update if different
+        if (!existingValue || existingValue === '') {
+          mergedFields[airtableField] = newValue;
+          fieldsToUpdate++;
+        }
+      });
+
+      // Also process schema-mapped fields from phase2FieldMapping
+      Object.entries(phase2FieldMapping.outputFields).forEach(([fieldId, config]) => {
+        if (!config.enabled) return;
+
+        const newValue = newRecord[fieldId] || newRecord[config.fieldName];
+        const existingValue = existingRecord.fields[config.fieldName];
+
+        // Skip if no new value
+        if (newValue === undefined || newValue === null || newValue === '') return;
+
+        // Skip if already handled above
+        if (Object.values(ourFieldToAirtable).includes(config.fieldName)) return;
+
+        // Skip computed fields
+        const computedTypes = ['formula', 'rollup', 'lookup', 'count', 'autoNumber', 'createdTime', 'lastModifiedTime', 'createdBy', 'lastModifiedBy'];
+        if (computedTypes.includes(config.fieldType)) return;
+
+        // Handle based on field type
+        if (config.fieldType === 'multipleRecordLinks') {
+          const newLinks = Array.isArray(newValue) ? newValue : (newValue ? [newValue] : []);
+          const existingLinks = existingValue || [];
+          if (newLinks.length > 0 && (!existingLinks.length || newLinks[0] !== existingLinks[0])) {
+            mergedFields[config.fieldName] = newLinks;
+            fieldsToUpdate++;
+          }
+        } else if (config.fieldType === 'checkbox') {
+          // Only update checkbox if currently false/empty
+          if (!existingValue && newValue) {
+            mergedFields[config.fieldName] = Boolean(newValue);
+            fieldsToUpdate++;
+          }
+        } else if (!existingValue || existingValue === '') {
+          // Fill in empty values for text, number, etc.
+          mergedFields[config.fieldName] = newValue;
+          fieldsToUpdate++;
+        }
+      });
+
+      return { mergedFields, fieldsToUpdate };
+    };
+
     const preview = { new: [], existing: [], errors: [] };
+    let totalFieldsToMerge = 0;
 
     phase2Result.caseMaster.forEach((record, idx) => {
       const matterId = record.Matter_ID || record['clio_matter_id'] || '';
@@ -3152,12 +3286,18 @@ function ClioAirtableMerger() {
       const existingRecord = clioMatterIdLookup.get(normalizedMatterId);
 
       if (existingRecord) {
+        // Compute what fields would be merged
+        const { mergedFields, fieldsToUpdate } = computeMergedFields(record, existingRecord);
+        totalFieldsToMerge += fieldsToUpdate;
+
         preview.existing.push({
           sourceIndex: idx,
           sourceData: record,
           existingRecord,
           matchedField: 'clio_matter_id',
-          matchedValue: matterId
+          matchedValue: matterId,
+          mergedFields, // Fields that will be updated
+          fieldsToUpdate // Count of fields to update
         });
       } else {
         preview.new.push({
@@ -3167,6 +3307,10 @@ function ClioAirtableMerger() {
       }
     });
 
+    // Count how many existing records actually need updates
+    const recordsWithUpdates = preview.existing.filter(item => item.fieldsToUpdate > 0).length;
+    const recordsNoUpdates = preview.existing.length - recordsWithUpdates;
+
     setPhase2Sync(prev => ({
       ...prev,
       caseMasterPreview: preview
@@ -3174,10 +3318,102 @@ function ClioAirtableMerger() {
 
     addPhase2Log(`Duplicate check complete:`, 'success');
     addPhase2Log(`  ${preview.new.length} NEW records to create`, 'info');
-    addPhase2Log(`  ${preview.existing.length} EXISTING records (will skip - already in Airtable)`, 'warning');
+    addPhase2Log(`  ${recordsWithUpdates} EXISTING records to MERGE (${totalFieldsToMerge} total fields to update)`, 'warning');
+    if (recordsNoUpdates > 0) {
+      addPhase2Log(`  ${recordsNoUpdates} EXISTING records already complete (no merge needed)`, 'info');
+    }
     if (preview.errors.length > 0) {
       addPhase2Log(`  ${preview.errors.length} records with errors`, 'error');
     }
+  };
+
+  // Update existing Case Master View records with merged fields
+  const updateDuplicateCaseMasters = async (testMode = false) => {
+    // Filter to only records that have fields to update
+    const recordsToUpdate = phase2Sync.caseMasterPreview.existing.filter(item => item.fieldsToUpdate > 0);
+
+    if (recordsToUpdate.length === 0) {
+      addPhase2Log('No records need updating - all existing records are already complete', 'info');
+      return;
+    }
+
+    if (!airtableApiKey || !devToolsBaseId) {
+      addPhase2Log('Please enter API key and select a Base first', 'error');
+      return;
+    }
+
+    const recordsToProcess = testMode ? recordsToUpdate.slice(0, 5) : recordsToUpdate;
+    const totalFields = recordsToProcess.reduce((sum, r) => sum + r.fieldsToUpdate, 0);
+
+    setPhase2Sync(prev => ({
+      ...prev,
+      loading: true,
+      progress: { current: 0, total: recordsToProcess.length, phase: 'Merging Case Master Views' }
+    }));
+
+    addPhase2Log(`${testMode ? 'TEST: ' : ''}Starting merge of ${recordsToProcess.length} records (${totalFields} fields)...`, 'info');
+
+    let updated = 0;
+    let failed = 0;
+
+    // Process in batches of 10 (Airtable API limit)
+    for (let i = 0; i < recordsToProcess.length; i += 10) {
+      const batch = recordsToProcess.slice(i, i + 10);
+
+      const airtableRecords = batch.map(item => ({
+        id: item.existingRecord.id,
+        fields: item.mergedFields
+      }));
+
+      // Debug: Log first batch fields
+      if (i === 0 && airtableRecords.length > 0) {
+        const firstRec = airtableRecords[0];
+        addPhase2Log(`First record update: ${firstRec.id} - ${Object.keys(firstRec.fields).join(', ')}`, 'info');
+      }
+
+      try {
+        // Use PATCH to update existing records
+        const response = await fetch(
+          `https://api.airtable.com/v0/${devToolsBaseId}/${CASE_MASTER_VIEW_TABLE_ID}`,
+          {
+            method: 'PATCH',
+            headers: {
+              'Authorization': `Bearer ${airtableApiKey}`,
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ records: airtableRecords })
+          }
+        );
+
+        if (!response.ok) {
+          const errData = await response.json().catch(() => ({}));
+          throw new Error(errData.error?.message || `HTTP ${response.status}`);
+        }
+
+        const result = await response.json();
+        updated += result.records.length;
+        addPhase2Log(`Merge batch ${Math.floor(i/10) + 1}: Updated ${result.records.length} records`, 'success');
+
+        setPhase2Sync(prev => ({
+          ...prev,
+          progress: { ...prev.progress, current: i + batch.length }
+        }));
+      } catch (err) {
+        failed += batch.length;
+        addPhase2Log(`Merge batch ${Math.floor(i/10) + 1} failed: ${err.message}`, 'error');
+      }
+
+      // Rate limiting: 250ms between batches (Airtable allows 5 req/sec)
+      await new Promise(resolve => setTimeout(resolve, 250));
+    }
+
+    setPhase2Sync(prev => ({
+      ...prev,
+      loading: false,
+      progress: { current: 0, total: 0, phase: '' }
+    }));
+
+    addPhase2Log(`Merge complete: ${updated} records updated, ${failed} failed`, updated > 0 ? 'success' : 'warning');
   };
 
   // Create missing client records in Airtable for Phase 2
@@ -6017,8 +6253,10 @@ function ClioAirtableMerger() {
                           <div style={{ fontSize: '0.65rem', color: '#71717a' }}>New (to create)</div>
                         </div>
                         <div style={{ background: '#1e293b', padding: '0.5rem', borderRadius: '4px', textAlign: 'center' }}>
-                          <div style={{ fontSize: '1.25rem', fontWeight: 'bold', color: '#f59e0b' }}>{phase2Sync.caseMasterPreview.existing.length}</div>
-                          <div style={{ fontSize: '0.65rem', color: '#71717a' }}>Duplicates (skip)</div>
+                          <div style={{ fontSize: '1.25rem', fontWeight: 'bold', color: '#f59e0b' }}>
+                            {phase2Sync.caseMasterPreview.existing.filter(r => r.fieldsToUpdate > 0).length}
+                          </div>
+                          <div style={{ fontSize: '0.65rem', color: '#71717a' }}>To Merge</div>
                         </div>
                         <div style={{ background: '#1e293b', padding: '0.5rem', borderRadius: '4px', textAlign: 'center' }}>
                           <div style={{ fontSize: '1.25rem', fontWeight: 'bold', color: '#ef4444' }}>{phase2Sync.caseMasterPreview.errors.length}</div>
@@ -6060,6 +6298,38 @@ function ClioAirtableMerger() {
                         >
                           2. Check Duplicates
                         </button>
+                        <button
+                          onClick={() => updateDuplicateCaseMasters(true)}
+                          disabled={phase2Sync.loading || phase2Sync.caseMasterPreview.existing.filter(r => r.fieldsToUpdate > 0).length === 0}
+                          style={{
+                            padding: '0.4rem 0.75rem',
+                            background: phase2Sync.loading || phase2Sync.caseMasterPreview.existing.filter(r => r.fieldsToUpdate > 0).length === 0 ? '#374151' : '#f59e0b',
+                            color: 'white',
+                            border: 'none',
+                            borderRadius: '4px',
+                            cursor: phase2Sync.loading || phase2Sync.caseMasterPreview.existing.filter(r => r.fieldsToUpdate > 0).length === 0 ? 'not-allowed' : 'pointer',
+                            fontSize: '0.75rem',
+                            opacity: phase2Sync.loading || phase2Sync.caseMasterPreview.existing.filter(r => r.fieldsToUpdate > 0).length === 0 ? 0.6 : 1
+                          }}
+                        >
+                          3. Test Merge (5)
+                        </button>
+                        <button
+                          onClick={() => updateDuplicateCaseMasters(false)}
+                          disabled={phase2Sync.loading || phase2Sync.caseMasterPreview.existing.filter(r => r.fieldsToUpdate > 0).length === 0}
+                          style={{
+                            padding: '0.4rem 0.75rem',
+                            background: phase2Sync.loading || phase2Sync.caseMasterPreview.existing.filter(r => r.fieldsToUpdate > 0).length === 0 ? '#374151' : '#ea580c',
+                            color: 'white',
+                            border: 'none',
+                            borderRadius: '4px',
+                            cursor: phase2Sync.loading || phase2Sync.caseMasterPreview.existing.filter(r => r.fieldsToUpdate > 0).length === 0 ? 'not-allowed' : 'pointer',
+                            fontSize: '0.75rem',
+                            opacity: phase2Sync.loading || phase2Sync.caseMasterPreview.existing.filter(r => r.fieldsToUpdate > 0).length === 0 ? 0.6 : 1
+                          }}
+                        >
+                          Merge All ({phase2Sync.caseMasterPreview.existing.filter(r => r.fieldsToUpdate > 0).length})
+                        </button>
                       </div>
 
                       {/* Helper message */}
@@ -6070,8 +6340,8 @@ function ClioAirtableMerger() {
                       )}
                     </div>
 
-                    {/* Progress bar during upload */}
-                    {phase2Sync.loading && phase2Sync.progress.phase === 'Uploading Case Master Views' && (
+                    {/* Progress bar during upload or merge */}
+                    {phase2Sync.loading && (phase2Sync.progress.phase === 'Uploading Case Master Views' || phase2Sync.progress.phase === 'Merging Case Master Views') && (
                       <div style={{ marginBottom: '1rem' }}>
                         <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.75rem', color: '#94a3b8', marginBottom: '0.25rem' }}>
                           <span>{phase2Sync.progress.phase}</span>
