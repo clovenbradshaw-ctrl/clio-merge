@@ -3439,17 +3439,18 @@ function ClioAirtableMerger() {
     const fieldIdToName = new Map(caseMasterSchema.fields.map(f => [f.id, f.name]));
 
     // Build mapping from our output field names to Airtable field names
-    // Note: Display_Number -> PP ID mapping removed since PP ID is a computed field
+    // Note: Computed fields excluded - they cannot be written to Airtable:
+    //   - Display_Number -> PP ID (formula)
+    //   - Client_Name -> Client Name (formula/lookup)
+    //   - Client_ID -> Client ID (formula/lookup)
+    //   - Note_Count -> Note Count (count/rollup)
     const ourFieldToAirtable = {
-      'Client_Name': 'Client Name',
       'Matter_ID': 'clio_matter_id',
       'Description': 'Description',
       'Status': 'Status',
       'Mapped_Status': 'File Case Status',
       'Notes': 'Case Notes',
-      'Note_Count': 'Note Count',
       'Airtable_Record_ID': 'Edit Client Info', // Link field
-      'Client_ID': 'Client ID',
       'Open_Date': 'Open Date',
       'Close_Date': 'Close Date',
     };
