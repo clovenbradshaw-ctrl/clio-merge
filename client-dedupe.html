@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Client Deduplication Tool</title>
+  <title>Bahr Client Deduplication Tool</title>
   <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
@@ -459,7 +459,6 @@ function App() {
 
   const [activeTab, setActiveTab] = useState('duplicates');
   const [showOnlyWithBox, setShowOnlyWithBox] = useState(false);
-  const [showOnlyBahr, setShowOnlyBahr] = useState(false);
 
   const logRef = useRef(null);
 
@@ -486,6 +485,12 @@ function App() {
     setLogs([]);
   }, []);
 
+  // Build filter formula for Bahr clients created yesterday or today
+  const buildBahrDateFilter = () => {
+    // Filter: Bahr Client = true AND Created At is yesterday or today
+    return `AND({Bahr Client}, OR(IS_SAME(CREATED_TIME(), TODAY(), 'day'), IS_SAME(CREATED_TIME(), DATEADD(TODAY(), -1, 'day'), 'day')))`;
+  };
+
   // Fetch all client records
   const fetchAllClients = async () => {
     if (!apiKey) {
@@ -495,12 +500,14 @@ function App() {
 
     setLoading(true);
     clearLogs();
-    addLog('Starting to fetch all Client Info records...', 'info');
+    addLog('Fetching Bahr clients created yesterday or today...', 'info');
     setProgress({ current: 0, total: 0, phase: 'Fetching records' });
 
     try {
       const client = new AirtableClient(apiKey, baseId);
-      const records = await client.getAllRecords(CLIENT_INFO_TABLE, FIELDS_TO_FETCH, '', addLog);
+      const filterFormula = buildBahrDateFilter();
+      addLog(`Filter: ${filterFormula}`, 'info');
+      const records = await client.getAllRecords(CLIENT_INFO_TABLE, FIELDS_TO_FETCH, filterFormula, addLog);
 
       setAllRecords(records);
       addLog(`Successfully fetched ${records.length} total client records`, 'success');
@@ -792,6 +799,7 @@ function App() {
   };
 
   // Filter duplicate groups based on current filters
+  // Note: Data is already filtered to Bahr clients created yesterday/today at the API level
   const filteredGroups = duplicateGroups.filter(group => {
     if (showOnlyWithBox) {
       const hasBox = group.deleteRecords.some(dr => {
@@ -801,21 +809,13 @@ function App() {
       if (!hasBox) return false;
     }
 
-    if (showOnlyBahr) {
-      const hasBahr = group.deleteRecords.some(dr => {
-        const fields = dr.record.fields || {};
-        return fields['Bahr Client'];
-      });
-      if (!hasBahr) return false;
-    }
-
     return true;
   });
 
   return (
     <div className="container">
-      <h1>Client Deduplication Tool</h1>
-      <p className="subtitle">Find and remove duplicate client records from Airtable, with Box folder tracking</p>
+      <h1>Bahr Client Deduplication Tool</h1>
+      <p className="subtitle">Find and remove duplicate Bahr client records created yesterday or today</p>
 
       {/* API Configuration */}
       <div className="card">
@@ -840,7 +840,7 @@ function App() {
         </div>
         <div className="btn-group">
           <button className="primary" onClick={fetchAllClients} disabled={loading || !apiKey}>
-            {loading ? 'Loading...' : 'Fetch All Clients & Find Duplicates'}
+            {loading ? 'Loading...' : 'Fetch Bahr Clients (Yesterday/Today) & Find Duplicates'}
           </button>
         </div>
       </div>
@@ -922,14 +922,9 @@ function App() {
               />
               Show only groups with Box folders
             </label>
-            <label className="checkbox-label">
-              <input
-                type="checkbox"
-                checked={showOnlyBahr}
-                onChange={e => setShowOnlyBahr(e.target.checked)}
-              />
-              Show only Bahr clients
-            </label>
+            <span style={{ color: '#10b981', fontSize: '0.9em' }}>
+              (Showing only Bahr clients created yesterday or today)
+            </span>
           </div>
 
           <div className="table-container">
