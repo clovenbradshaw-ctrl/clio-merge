@@ -208,6 +208,54 @@ const normalizeName = (lastName, firstName) => {
   return `${clean(lastName)}|${clean(firstName)}`;
 };
 
+// Parse client name into family and first name components
+// Handles formats like "Vasquez, Vivian" or "Hernandez Ulloa, Leidy Karina"
+const parseClientName = (fullName) => {
+  if (!fullName || typeof fullName !== 'string') {
+    return { familyName: '', firstName: '' };
+  }
+
+  const trimmed = fullName.trim();
+  if (!trimmed) {
+    return { familyName: '', firstName: '' };
+  }
+
+  // Check for "Family, First" format (most common from Clio)
+  if (trimmed.includes(',')) {
+    const parts = trimmed.split(',');
+    const familyName = (parts[0] || '').trim();
+    const firstName = (parts.slice(1).join(',') || '').trim(); // Join in case name has multiple commas
+    return { familyName, firstName };
+  }
+
+  // No comma - try to intelligently split "First Last" format
+  // For Spanish naming: typically "FirstName [MiddleName] PatronymicLast MatronymicLast"
+  const words = trimmed.split(/\s+/).filter(w => w.length > 0);
+
+  if (words.length === 0) {
+    return { familyName: '', firstName: '' };
+  }
+
+  if (words.length === 1) {
+    // Single word - put it in family name
+    return { familyName: words[0], firstName: '' };
+  }
+
+  if (words.length === 2) {
+    // Two words: "First Last"
+    return { familyName: words[1], firstName: words[0] };
+  }
+
+  if (words.length === 3) {
+    // Three words: "First Last1 Last2" (common Spanish format)
+    return { familyName: words.slice(1).join(' '), firstName: words[0] };
+  }
+
+  // Four or more words: "First Middle Last1 Last2" or "First Last1 Last2 Last3"
+  // Take first word as first name, rest as family name
+  return { familyName: words.slice(1).join(' '), firstName: words[0] };
+};
+
 // Normalize date to YYYY-MM-DD format for Airtable
 const normalizeDate = (value) => {
   if (!value) return '';
@@ -3021,14 +3069,20 @@ function ClioAirtableMerger() {
     for (let i = 0; i < missingClients.length; i += 10) {
       const batch = missingClients.slice(i, i + 10);
 
-      const airtableRecords = batch.map(client => ({
-        fields: {
-          'clio_contact_id': client.clientId,
-          'Bahr Client': true,
-          // Add client name if we have it (may be combined first/last or just a name)
-          ...(client.clientName ? { 'Family Name': client.clientName } : {})
-        }
-      }));
+      const airtableRecords = batch.map(client => {
+        // Parse client name into family and first name components
+        const { familyName, firstName } = parseClientName(client.clientName);
+
+        return {
+          fields: {
+            'clio_contact_id': client.clientId,
+            'Bahr Client': true,
+            // Add parsed name fields if available
+            ...(familyName ? { 'Family Name': familyName } : {}),
+            ...(firstName ? { 'First Name': firstName } : {})
+          }
+        };
+      });
 
       try {
         const response = await fetch(
