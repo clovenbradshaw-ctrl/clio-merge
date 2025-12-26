@@ -459,7 +459,6 @@ function App() {
 
   const [activeTab, setActiveTab] = useState('duplicates');
   const [showOnlyWithBox, setShowOnlyWithBox] = useState(false);
-  const [showOnlyBahr, setShowOnlyBahr] = useState(false);
 
   const logRef = useRef(null);
 
@@ -495,15 +494,17 @@ function App() {
 
     setLoading(true);
     clearLogs();
-    addLog('Starting to fetch all Client Info records...', 'info');
-    setProgress({ current: 0, total: 0, phase: 'Fetching records' });
+    addLog('Starting to fetch Bahr Client records...', 'info');
+    setProgress({ current: 0, total: 0, phase: 'Fetching Bahr clients' });
 
     try {
       const client = new AirtableClient(apiKey, baseId);
-      const records = await client.getAllRecords(CLIENT_INFO_TABLE, FIELDS_TO_FETCH, '', addLog);
+      // Filter to only Bahr Client = true records
+      const filterFormula = '{Bahr Client}=TRUE()';
+      const records = await client.getAllRecords(CLIENT_INFO_TABLE, FIELDS_TO_FETCH, filterFormula, addLog);
 
       setAllRecords(records);
-      addLog(`Successfully fetched ${records.length} total client records`, 'success');
+      addLog(`Successfully fetched ${records.length} Bahr client records`, 'success');
 
       // Automatically find duplicates
       findDuplicates(records);
@@ -801,21 +802,13 @@ function App() {
       if (!hasBox) return false;
     }
 
-    if (showOnlyBahr) {
-      const hasBahr = group.deleteRecords.some(dr => {
-        const fields = dr.record.fields || {};
-        return fields['Bahr Client'];
-      });
-      if (!hasBahr) return false;
-    }
-
     return true;
   });
 
   return (
     <div className="container">
       <h1>Client Deduplication Tool</h1>
-      <p className="subtitle">Find and remove duplicate client records from Airtable, with Box folder tracking</p>
+      <p className="subtitle">Find and remove duplicate Bahr import client records from Airtable, with Box folder tracking</p>
 
       {/* API Configuration */}
       <div className="card">
@@ -840,7 +833,7 @@ function App() {
         </div>
         <div className="btn-group">
           <button className="primary" onClick={fetchAllClients} disabled={loading || !apiKey}>
-            {loading ? 'Loading...' : 'Fetch All Clients & Find Duplicates'}
+            {loading ? 'Loading...' : 'Fetch Bahr Clients & Find Duplicates'}
           </button>
         </div>
       </div>
@@ -921,14 +914,6 @@ function App() {
                 onChange={e => setShowOnlyWithBox(e.target.checked)}
               />
               Show only groups with Box folders
-            </label>
-            <label className="checkbox-label">
-              <input
-                type="checkbox"
-                checked={showOnlyBahr}
-                onChange={e => setShowOnlyBahr(e.target.checked)}
-              />
-              Show only Bahr clients
             </label>
           </div>
 
@@ -1100,7 +1085,7 @@ function App() {
         <h2>Activity Log</h2>
         <div className="log-container" ref={logRef}>
           {logs.length === 0 ? (
-            <div className="log-entry info">Ready - click "Fetch All Clients" to start</div>
+            <div className="log-entry info">Ready - click "Fetch Bahr Clients" to start</div>
           ) : (
             logs.map((log, idx) => (
               <div key={idx} className={`log-entry ${log.type}`}>
