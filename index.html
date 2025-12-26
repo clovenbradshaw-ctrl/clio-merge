@@ -3088,6 +3088,10 @@ function ClioAirtableMerger() {
   const runPhase2 = useCallback(async () => {
     const reports = [];
 
+    // Set loading state
+    setPhase2Sync(prev => ({ ...prev, loading: true }));
+
+    try {
     // Build clio_contact_id -> Airtable Record ID lookup from Airtable export
     const clioContactToRecordId = new Map();
     const clientIdToRecordId = new Map();
@@ -3519,6 +3523,12 @@ function ClioAirtableMerger() {
 
     setPhase2Result({ caseMaster: caseMasterOutput, matchingStats });
     setPhase2Report(reports);
+    } catch (err) {
+      console.error('runPhase2 error:', err);
+      setPhase2Report([{ type: 'error', message: `Error generating Case Master Views: ${err.message}` }]);
+    } finally {
+      setPhase2Sync(prev => ({ ...prev, loading: false }));
+    }
   }, [phase2Data, phase2FieldMapping, airtableApiKey, devToolsBaseId]);
 
   // Download Phase 2 data as JSON with flatpack field
@@ -5539,10 +5549,10 @@ function ClioAirtableMerger() {
               <button
                 className="btn btn-primary"
                 onClick={runPhase2}
-                disabled={!phase2Data.airtableClients?.rows?.length || !phase2Data.clioMatters?.rows?.length}
+                disabled={!phase2Data.airtableClients?.rows?.length || !phase2Data.clioMatters?.rows?.length || phase2Sync.loading}
                 style={{ marginBottom: '1.5rem' }}
               >
-                Generate case_master_views.csv
+                {phase2Sync.loading ? 'Generating...' : 'Generate case_master_views.csv'}
               </button>
 
               {phase2Report.length > 0 && (
