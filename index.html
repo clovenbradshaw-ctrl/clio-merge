@@ -2992,8 +2992,100 @@ function ClioAirtableMerger() {
     }
   };
 
+  // Create missing client records in Airtable for Phase 2
+  // Returns a map of clio_contact_id -> Airtable Record ID for newly created records
+  const createMissingClientsInAirtable = async (missingClients) => {
+    const createdRecords = new Map();
+
+    if (!missingClients || missingClients.length === 0) {
+      return createdRecords;
+    }
+
+    if (!airtableApiKey || !devToolsBaseId) {
+      addPhase2Log('Cannot create clients: API key or Base ID not configured', 'error');
+      return createdRecords;
+    }
+
+    addPhase2Log(`Creating ${missingClients.length} missing client records in Airtable...`, 'info');
+
+    setPhase2Sync(prev => ({
+      ...prev,
+      loading: true,
+      progress: { current: 0, total: missingClients.length, phase: 'Creating Client Records' }
+    }));
+
+    let created = 0;
+    let failed = 0;
+
+    // Process in batches of 10 (Airtable API limit)
+    for (let i = 0; i < missingClients.length; i += 10) {
+      const batch = missingClients.slice(i, i + 10);
+
+      const airtableRecords = batch.map(client => ({
+        fields: {
+          'clio_contact_id': client.clientId,
+          'Bahr Client': true,
+          // Add client name if we have it (may be combined first/last or just a name)
+          ...(client.clientName ? { 'Family Name': client.clientName } : {})
+        }
+      }));
+
+      try {
+        const response = await fetch(
+          `https://api.airtable.com/v0/${devToolsBaseId}/Client%20Info`,
+          {
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${airtableApiKey}`,
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ records: airtableRecords })
+          }
+        );
+
+        if (!response.ok) {
+          const errData = await response.json().catch(() => ({}));
+          throw new Error(errData.error?.message || `HTTP ${response.status}`);
+        }
+
+        const result = await response.json();
+
+        // Map the created records back to their clio_contact_ids
+        result.records.forEach((record, idx) => {
+          const clioContactId = batch[idx].clientId;
+          const recordId = record.id;
+          createdRecords.set(clioContactId, recordId);
+        });
+
+        created += result.records.length;
+        addPhase2Log(`Batch ${Math.floor(i/10) + 1}: Created ${result.records.length} client records`, 'success');
+
+        setPhase2Sync(prev => ({
+          ...prev,
+          progress: { ...prev.progress, current: i + batch.length }
+        }));
+      } catch (err) {
+        failed += batch.length;
+        addPhase2Log(`Batch ${Math.floor(i/10) + 1} failed: ${err.message}`, 'error');
+      }
+
+      // Rate limiting: 250ms between batches
+      await new Promise(resolve => setTimeout(resolve, 250));
+    }
+
+    setPhase2Sync(prev => ({
+      ...prev,
+      loading: false,
+      progress: { current: missingClients.length, total: missingClients.length, phase: 'Client Creation Complete' }
+    }));
+
+    addPhase2Log(`Client creation complete: ${created} created, ${failed} failed`, created > 0 ? 'success' : 'error');
+
+    return createdRecords;
+  };
+
   // Phase 2: Case Master Views
-  const runPhase2 = useCallback(() => {
+  const runPhase2 = useCallback(async () => {
     const reports = [];
 
     // Build clio_contact_id -> Airtable Record ID lookup from Airtable export
@@ -3191,6 +3283,35 @@ function ClioAirtableMerger() {
         reports.push({ type: 'info', message: `Sample note ${detectedNoteMatterIdField}: ${sampleNoteIds.map(id => `"${id}"`).join(', ')}` });
         reports.push({ type: 'info', message: `Sample matter UniqueId: ${sampleMatterIds.map(id => `"${id}"`).join(', ')}` });
       }
+    }
+
+    // Identify clients that don't have Airtable records and need to be created
+    const missingClients = [];
+    const seenClientIds = new Set();
+
+    mattersLookup.forEach((matter) => {
+      const clientId = matter.clientId;
+      if (clientId && !clioContactToRecordId.has(clientId) && !seenClientIds.has(clientId)) {
+        seenClientIds.add(clientId);
+        missingClients.push({
+          clientId: clientId,
+          clientName: matter.clientName || ''
+        });
+      }
+    });
+
+    if (missingClients.length > 0) {
+      reports.push({ type: 'info', message: `Found ${missingClients.length} clients without Airtable records - creating them...` });
+
+      // Create missing clients in Airtable
+      const createdRecords = await createMissingClientsInAirtable(missingClients);
+
+      // Update the lookup map with newly created records
+      createdRecords.forEach((recordId, clientId) => {
+        clioContactToRecordId.set(clientId, recordId);
+      });
+
+      reports.push({ type: 'success', message: `Created ${createdRecords.size} new client records in Airtable` });
     }
 
     // Build Case Master View output using field mappings
@@ -3398,7 +3519,7 @@ function ClioAirtableMerger() {
 
     setPhase2Result({ caseMaster: caseMasterOutput, matchingStats });
     setPhase2Report(reports);
-  }, [phase2Data, phase2FieldMapping]);
+  }, [phase2Data, phase2FieldMapping, airtableApiKey, devToolsBaseId]);
 
   // Download Phase 2 data as JSON with flatpack field
   const downloadPhase2JSON = () => {
