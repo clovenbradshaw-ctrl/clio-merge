@@ -3442,10 +3442,10 @@ function ClioAirtableMerger() {
     // Note: Only includes fields that exist in the Airtable schema
     // Excluded computed fields (cannot write): PP ID, Client Name, Client ID, Note Count
     // Excluded non-existent fields: Status, Open Date, Close Date
+    // Excluded singleSelect fields: File Case Status (use schema mapping instead)
     const ourFieldToAirtable = {
       'Matter_ID': 'clio_matter_id',
       'Description': 'Description',
-      'Mapped_Status': 'File Case Status',
       'Notes': 'Case Notes',
       'Airtable_Record_ID': 'Edit Client Info', // Link field
     };
@@ -3495,16 +3495,6 @@ function ClioAirtableMerger() {
             if (key === 'Airtable_Record_ID' && value) {
               // Link fields need to be arrays of record IDs
               fields[airtableFieldName] = [value];
-            } else if (key === 'Mapped_Status') {
-              // singleSelect field - validate against schema options
-              const schemaField = caseMasterSchema.fields.find(f => f.name === airtableFieldName);
-              const validOptions = schemaField?.options?.choices?.map(c => c.name) || [];
-              if (value && validOptions.includes(value)) {
-                fields[airtableFieldName] = value;
-              } else if (value && recIdx === 0 && i === 0) {
-                // Log warning about invalid option for first record only
-                addPhase2Log(`Warning: "${value}" is not a valid option for ${airtableFieldName}. Valid options: ${validOptions.slice(0, 5).join(', ')}${validOptions.length > 5 ? '...' : ''}`, 'warning');
-              }
             } else {
               fields[airtableFieldName] = value;
             }
