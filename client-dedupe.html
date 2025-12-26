@@ -699,10 +699,10 @@ function App() {
       const filterFormula = buildBahrFilter();
       addLog(`Filter: ${filterFormula}`, 'info');
 
-      // Fetch all writable fields plus uscis_flatpack_data for merge notes
+      // Fetch all writable fields plus bahr_import_flatpack_data for merge notes
       const fieldsToFetch = [...tableSchema.writableFields];
-      if (!fieldsToFetch.includes('uscis_flatpack_data')) {
-        fieldsToFetch.push('uscis_flatpack_data');
+      if (!fieldsToFetch.includes('bahr_import_flatpack_data')) {
+        fieldsToFetch.push('bahr_import_flatpack_data');
       }
 
       const records = await client.getAllRecords(CLIENT_INFO_TABLE, fieldsToFetch, filterFormula, addLog);
@@ -968,7 +968,7 @@ function App() {
     }
 
     // Single confirmation for bulk operation
-    if (!window.confirm(`BULK MERGE & DELETE\n\nThis will:\n• Merge all non-computed fields from ${recordsToDelete.length} duplicates into ${duplicateGroups.length} kept records\n• Add merge history to uscis_flatpack_data\n• DELETE ${recordsToDelete.length} duplicate records\n• Box folder links will NOT be merged (require manual cleanup)\n\nThis cannot be undone! Continue?`)) {
+    if (!window.confirm(`BULK MERGE & DELETE\n\nThis will:\n• Merge all non-computed fields from ${recordsToDelete.length} duplicates into ${duplicateGroups.length} kept records\n• Add merge history to bahr_import_flatpack_data\n• DELETE ${recordsToDelete.length} duplicate records\n• Box folder links will NOT be merged (require manual cleanup)\n\nThis cannot be undone! Continue?`)) {
       return;
     }
 
@@ -997,9 +997,9 @@ function App() {
       const mergeNote = buildMergeNote(group.keepRecord, group.deleteRecords, mergeLog);
 
       // Update flatpack with merge note
-      const currentFlatpack = group.keepRecord.record.fields['uscis_flatpack_data'];
+      const currentFlatpack = group.keepRecord.record.fields['bahr_import_flatpack_data'];
       const updatedFlatpack = updateFlatpackWithMergeNote(currentFlatpack, mergeNote);
-      mergedFields['uscis_flatpack_data'] = updatedFlatpack;
+      mergedFields['bahr_import_flatpack_data'] = updatedFlatpack;
 
       if (mergeLog.length === 0) {
         addLog(`[${i + 1}/${duplicateGroups.length}] ${clientName}: No data changes (adding merge note only)`, 'info');
@@ -1327,7 +1327,7 @@ function App() {
             <ul style={{ color: '#94a3b8', marginBottom: '15px', marginLeft: '20px', fontSize: '0.9em' }}>
               <li>Link fields: Case Master Views, Events, Relationships, Notes, Matters, etc.</li>
               <li>Text fields: A#, DOB, contact info, addresses, IDs, etc.</li>
-              <li>Adds merge history note to uscis_flatpack_data</li>
+              <li>Adds merge history note to bahr_import_flatpack_data</li>
               <li style={{ color: '#f59e0b' }}>Box folder fields are EXCLUDED (require manual cleanup)</li>
             </ul>
             <button
