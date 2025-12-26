@@ -76,6 +76,414 @@ const XANO_CASE_NOTES_SCHEMA = {
   eventId: 'text',
 };
 
+// ================================================================================
+// FIELD HISTORY & PROVENANCE TRACKING SYSTEM
+// ================================================================================
+// Tracks all field-level changes with full audit trail, provenance, and export
+
+/**
+ * FieldHistoryManager - Singleton class for managing field change history
+ * Provides complete audit trail for all field modifications across records
+ */
+class FieldHistoryManager {
+  constructor() {
+    // Initialize from localStorage or create fresh
+    const stored = localStorage.getItem('field_history_data');
+    if (stored) {
+      try {
+        const parsed = JSON.parse(stored);
+        this.history = parsed.history || [];
+        this.recordProvenance = parsed.recordProvenance || {};
+        this.sessionId = this.generateSessionId();
+      } catch (e) {
+        console.warn('Failed to parse stored field history, starting fresh:', e);
+        this.history = [];
+        this.recordProvenance = {};
+        this.sessionId = this.generateSessionId();
+      }
+    } else {
+      this.history = [];
+      this.recordProvenance = {}; // recordId -> provenance info
+      this.sessionId = this.generateSessionId();
+    }
+    this.maxHistorySize = 50000; // Limit to prevent memory issues
+  }
+
+  generateSessionId() {
+    return `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+  }
+
+  /**
+   * Record a field change with full provenance
+   * @param {Object} params - Change parameters
+   * @param {string} params.recordId - Airtable record ID
+   * @param {string} params.recordIdentifier - Human-readable identifier (e.g., clio_matter_id, A#)
+   * @param {string} params.tableName - Table name (e.g., 'Case Master View', 'Client Info')
+   * @param {string} params.fieldName - Field that changed
+   * @param {*} params.oldValue - Previous value
+   * @param {*} params.newValue - New value
+   * @param {string} params.source - Data source (e.g., 'Clio Matters CSV', 'Manual Edit', 'Merge')
+   * @param {string} params.operation - Operation type ('CREATE', 'UPDATE', 'MERGE', 'DELETE')
+   * @param {string} params.reason - Optional reason for change
+   * @param {Object} params.sourceMetadata - Additional source context
+   */
+  recordChange(params) {
+    const {
+      recordId,
+      recordIdentifier,
+      tableName,
+      fieldName,
+      oldValue,
+      newValue,
+      source,
+      operation = 'UPDATE',
+      reason = '',
+      sourceMetadata = {}
+    } = params;
+
+    // Don't record if no actual change
+    if (this.valuesEqual(oldValue, newValue)) {
+      return null;
+    }
+
+    const entry = {
+      id: `change_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+      timestamp: new Date().toISOString(),
+      sessionId: this.sessionId,
+      recordId,
+      recordIdentifier,
+      tableName,
+      fieldName,
+      oldValue: this.serializeValue(oldValue),
+      newValue: this.serializeValue(newValue),
+      oldValueDisplay: this.formatDisplayValue(oldValue),
+      newValueDisplay: this.formatDisplayValue(newValue),
+      source,
+      operation,
+      reason,
+      sourceMetadata,
+      // Compute change metrics
+      changeType: this.determineChangeType(oldValue, newValue),
+    };
+
+    this.history.push(entry);
+
+    // Update record provenance
+    this.updateRecordProvenance(recordId, recordIdentifier, tableName, entry);
+
+    // Trim history if too large
+    if (this.history.length > this.maxHistorySize) {
+      this.history = this.history.slice(-this.maxHistorySize);
+    }
+
+    // Auto-save to localStorage (debounced would be better but keeping simple)
+    this.saveToLocalStorage();
+
+    return entry;
+  }
+
+  /**
+   * Record multiple field changes for a single record (batch)
+   */
+  recordBatchChanges(recordId, recordIdentifier, tableName, changes, source, operation = 'MERGE', sourceMetadata = {}) {
+    const entries = [];
+
+    for (const [fieldName, { oldValue, newValue, reason }] of Object.entries(changes)) {
+      const entry = this.recordChange({
+        recordId,
+        recordIdentifier,
+        tableName,
+        fieldName,
+        oldValue,
+        newValue,
+        source,
+        operation,
+        reason: reason || '',
+        sourceMetadata
+      });
+      if (entry) entries.push(entry);
+    }
+
+    return entries;
+  }
+
+  /**
+   * Update provenance information for a record
+   */
+  updateRecordProvenance(recordId, recordIdentifier, tableName, latestChange) {
+    if (!this.recordProvenance[recordId]) {
+      this.recordProvenance[recordId] = {
+        recordId,
+        recordIdentifier,
+        tableName,
+        createdAt: latestChange.timestamp,
+        createdSource: latestChange.source,
+        createdOperation: latestChange.operation,
+        lastModifiedAt: latestChange.timestamp,
+        lastModifiedSource: latestChange.source,
+        lastModifiedOperation: latestChange.operation,
+        changeCount: 1,
+        fieldChangeHistory: {},
+        sources: [latestChange.source]
+      };
+    } else {
+      const prov = this.recordProvenance[recordId];
+      prov.lastModifiedAt = latestChange.timestamp;
+      prov.lastModifiedSource = latestChange.source;
+      prov.lastModifiedOperation = latestChange.operation;
+      prov.changeCount++;
+      if (!prov.sources.includes(latestChange.source)) {
+        prov.sources.push(latestChange.source);
+      }
+    }
+
+    // Track per-field history summary
+    const prov = this.recordProvenance[recordId];
+    if (!prov.fieldChangeHistory[latestChange.fieldName]) {
+      prov.fieldChangeHistory[latestChange.fieldName] = {
+        changeCount: 0,
+        lastModifiedAt: null,
+        lastModifiedSource: null,
+        valueHistory: []
+      };
+    }
+    const fieldHist = prov.fieldChangeHistory[latestChange.fieldName];
+    fieldHist.changeCount++;
+    fieldHist.lastModifiedAt = latestChange.timestamp;
+    fieldHist.lastModifiedSource = latestChange.source;
+    // Keep last 10 values for each field
+    fieldHist.valueHistory.push({
+      value: latestChange.newValueDisplay,
+      timestamp: latestChange.timestamp,
+      source: latestChange.source
+    });
+    if (fieldHist.valueHistory.length > 10) {
+      fieldHist.valueHistory = fieldHist.valueHistory.slice(-10);
+    }
+  }
+
+  /**
+   * Get history for a specific record
+   */
+  getRecordHistory(recordId) {
+    return this.history.filter(entry => entry.recordId === recordId);
+  }
+
+  /**
+   * Get history for a specific field across all records
+   */
+  getFieldHistory(fieldName, tableName = null) {
+    return this.history.filter(entry =>
+      entry.fieldName === fieldName &&
+      (tableName === null || entry.tableName === tableName)
+    );
+  }
+
+  /**
+   * Get provenance for a specific record
+   */
+  getRecordProvenance(recordId) {
+    return this.recordProvenance[recordId] || null;
+  }
+
+  /**
+   * Get all history entries (with optional filtering)
+   */
+  getAllHistory(filters = {}) {
+    let result = [...this.history];
+
+    if (filters.tableName) {
+      result = result.filter(e => e.tableName === filters.tableName);
+    }
+    if (filters.source) {
+      result = result.filter(e => e.source === filters.source);
+    }
+    if (filters.operation) {
+      result = result.filter(e => e.operation === filters.operation);
+    }
+    if (filters.fieldName) {
+      result = result.filter(e => e.fieldName === filters.fieldName);
+    }
+    if (filters.startDate) {
+      result = result.filter(e => new Date(e.timestamp) >= new Date(filters.startDate));
+    }
+    if (filters.endDate) {
+      result = result.filter(e => new Date(e.timestamp) <= new Date(filters.endDate));
+    }
+
+    return result;
+  }
+
+  /**
+   * Get summary statistics
+   */
+  getStats() {
+    const stats = {
+      totalChanges: this.history.length,
+      recordsAffected: Object.keys(this.recordProvenance).length,
+      changesByTable: {},
+      changesBySource: {},
+      changesByOperation: {},
+      changesByField: {},
+      recentChanges: this.history.slice(-10).reverse()
+    };
+
+    for (const entry of this.history) {
+      // By table
+      stats.changesByTable[entry.tableName] = (stats.changesByTable[entry.tableName] || 0) + 1;
+      // By source
+      stats.changesBySource[entry.source] = (stats.changesBySource[entry.source] || 0) + 1;
+      // By operation
+      stats.changesByOperation[entry.operation] = (stats.changesByOperation[entry.operation] || 0) + 1;
+      // By field
+      const fieldKey = `${entry.tableName}.${entry.fieldName}`;
+      stats.changesByField[fieldKey] = (stats.changesByField[fieldKey] || 0) + 1;
+    }
+
+    return stats;
+  }
+
+  /**
+   * Export history to JSON
+   */
+  exportToJSON() {
+    return JSON.stringify({
+      exportedAt: new Date().toISOString(),
+      sessionId: this.sessionId,
+      stats: this.getStats(),
+      history: this.history,
+      recordProvenance: this.recordProvenance
+    }, null, 2);
+  }
+
+  /**
+   * Export history to CSV
+   */
+  exportToCSV() {
+    const headers = [
+      'Timestamp', 'Session ID', 'Record ID', 'Record Identifier', 'Table',
+      'Field', 'Old Value', 'New Value', 'Source', 'Operation', 'Change Type', 'Reason'
+    ];
+
+    const rows = this.history.map(entry => [
+      entry.timestamp,
+      entry.sessionId,
+      entry.recordId,
+      entry.recordIdentifier,
+      entry.tableName,
+      entry.fieldName,
+      entry.oldValueDisplay,
+      entry.newValueDisplay,
+      entry.source,
+      entry.operation,
+      entry.changeType,
+      entry.reason
+    ]);
+
+    // Escape CSV values
+    const escapeCSV = (val) => {
+      if (val === null || val === undefined) return '';
+      const str = String(val);
+      if (str.includes(',') || str.includes('"') || str.includes('\n')) {
+        return `"${str.replace(/"/g, '""')}"`;
+      }
+      return str;
+    };
+
+    return [
+      headers.join(','),
+      ...rows.map(row => row.map(escapeCSV).join(','))
+    ].join('\n');
+  }
+
+  /**
+   * Clear all history
+   */
+  clearHistory() {
+    this.history = [];
+    this.recordProvenance = {};
+    this.sessionId = this.generateSessionId();
+    this.saveToLocalStorage();
+  }
+
+  /**
+   * Save to localStorage
+   */
+  saveToLocalStorage() {
+    try {
+      localStorage.setItem('field_history_data', JSON.stringify({
+        history: this.history,
+        recordProvenance: this.recordProvenance
+      }));
+    } catch (e) {
+      console.warn('Failed to save field history to localStorage:', e);
+      // If storage is full, trim history
+      if (e.name === 'QuotaExceededError') {
+        this.history = this.history.slice(-10000);
+        try {
+          localStorage.setItem('field_history_data', JSON.stringify({
+            history: this.history,
+            recordProvenance: this.recordProvenance
+          }));
+        } catch (e2) {
+          console.error('Still failed after trimming:', e2);
+        }
+      }
+    }
+  }
+
+  // Helper methods
+  valuesEqual(a, b) {
+    if (a === b) return true;
+    if (a === null || a === undefined || a === '') {
+      return b === null || b === undefined || b === '';
+    }
+    if (Array.isArray(a) && Array.isArray(b)) {
+      return JSON.stringify(a) === JSON.stringify(b);
+    }
+    if (typeof a === 'object' && typeof b === 'object') {
+      return JSON.stringify(a) === JSON.stringify(b);
+    }
+    return String(a) === String(b);
+  }
+
+  serializeValue(val) {
+    if (val === null || val === undefined) return null;
+    if (typeof val === 'object') return JSON.stringify(val);
+    return val;
+  }
+
+  formatDisplayValue(val) {
+    if (val === null || val === undefined || val === '') return '(empty)';
+    if (Array.isArray(val)) {
+      return val.length > 3
+        ? `[${val.slice(0, 3).join(', ')}... +${val.length - 3} more]`
+        : `[${val.join(', ')}]`;
+    }
+    if (typeof val === 'object') {
+      const str = JSON.stringify(val);
+      return str.length > 100 ? str.substring(0, 100) + '...' : str;
+    }
+    const str = String(val);
+    return str.length > 200 ? str.substring(0, 200) + '...' : str;
+  }
+
+  determineChangeType(oldVal, newVal) {
+    const oldEmpty = oldVal === null || oldVal === undefined || oldVal === '' ||
+                     (Array.isArray(oldVal) && oldVal.length === 0);
+    const newEmpty = newVal === null || newVal === undefined || newVal === '' ||
+                     (Array.isArray(newVal) && newVal.length === 0);
+
+    if (oldEmpty && !newEmpty) return 'POPULATED';
+    if (!oldEmpty && newEmpty) return 'CLEARED';
+    if (!oldEmpty && !newEmpty) return 'MODIFIED';
+    return 'NO_CHANGE';
+  }
+}
+
+// Global singleton instance
+const fieldHistoryManager = new FieldHistoryManager();
+
 // State-machine CSV Parser - handles multiline quoted fields correctly
 // Auto-detects delimiter (tab or comma)
 const parseCSV = (text) => {
@@ -855,6 +1263,71 @@ function ClioAirtableMerger() {
     source: 'clio-merge',
   });
   const [caseNoteResult, setCaseNoteResult] = useState(null);
+
+  // Field History & Audit Trail State
+  const [showAuditPanel, setShowAuditPanel] = useState(false);
+  const [auditFilters, setAuditFilters] = useState({
+    tableName: '',
+    source: '',
+    operation: '',
+    fieldName: '',
+    searchQuery: ''
+  });
+  const [auditStats, setAuditStats] = useState(() => fieldHistoryManager.getStats());
+
+  // Refresh audit stats
+  const refreshAuditStats = useCallback(() => {
+    setAuditStats(fieldHistoryManager.getStats());
+  }, []);
+
+  // Export audit log functions
+  const exportAuditJSON = useCallback(() => {
+    const data = fieldHistoryManager.exportToJSON();
+    const blob = new Blob([data], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `audit-log-${new Date().toISOString().split('T')[0]}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }, []);
+
+  const exportAuditCSV = useCallback(() => {
+    const data = fieldHistoryManager.exportToCSV();
+    const blob = new Blob([data], { type: 'text/csv' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `audit-log-${new Date().toISOString().split('T')[0]}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }, []);
+
+  const clearAuditHistory = useCallback(() => {
+    if (window.confirm('Are you sure you want to clear all audit history? This cannot be undone.')) {
+      fieldHistoryManager.clearHistory();
+      refreshAuditStats();
+    }
+  }, [refreshAuditStats]);
+
+  // Get filtered history entries
+  const getFilteredHistory = useCallback(() => {
+    let history = fieldHistoryManager.getAllHistory(auditFilters);
+
+    // Apply text search if provided
+    if (auditFilters.searchQuery) {
+      const query = auditFilters.searchQuery.toLowerCase();
+      history = history.filter(entry =>
+        entry.recordIdentifier?.toLowerCase().includes(query) ||
+        entry.fieldName?.toLowerCase().includes(query) ||
+        entry.oldValueDisplay?.toLowerCase().includes(query) ||
+        entry.newValueDisplay?.toLowerCase().includes(query) ||
+        entry.reason?.toLowerCase().includes(query)
+      );
+    }
+
+    return history.slice(-100).reverse(); // Show most recent 100
+  }, [auditFilters]);
 
   // API Sync State
   const [syncState, setSyncState] = useState({
@@ -3144,9 +3617,22 @@ function ClioAirtableMerger() {
     };
 
     // Helper function to merge fields from new record into existing record
+    // Also captures field history for provenance tracking
     const computeMergedFields = (newRecord, existingRecord) => {
       const mergedFields = {};
+      const fieldChanges = {}; // Track old -> new for history
       let fieldsToUpdate = 0;
+
+      // Helper to record a field change
+      const recordFieldChange = (airtableField, oldValue, newValue, reason = '') => {
+        mergedFields[airtableField] = newValue;
+        fieldChanges[airtableField] = {
+          oldValue,
+          newValue,
+          reason
+        };
+        fieldsToUpdate++;
+      };
 
       // Process each mappable field from our new record
       Object.entries(ourFieldToAirtable).forEach(([ourField, airtableField]) => {
@@ -3164,8 +3650,7 @@ function ClioAirtableMerger() {
 
           // Only update if new value differs or existing is empty
           if (!existingLinks.length || (existingLinks.length > 0 && existingLinks[0] !== newValue)) {
-            mergedFields[airtableField] = newLinkValue;
-            fieldsToUpdate++;
+            recordFieldChange(airtableField, existingLinks, newLinkValue, 'Client link updated from Clio data');
           }
           return;
         }
@@ -3174,8 +3659,7 @@ function ClioAirtableMerger() {
         if (ourField === 'Notes') {
           if (!existingValue || existingValue.trim() === '') {
             // Existing is empty, use new
-            mergedFields[airtableField] = newValue;
-            fieldsToUpdate++;
+            recordFieldChange(airtableField, existingValue, newValue, 'Case notes populated from Clio');
           } else if (newValue && newValue.trim() !== '' && newValue !== existingValue) {
             // Both have values - merge by appending new notes if different
             // Check if new notes contain content not in existing
@@ -3185,8 +3669,7 @@ function ClioAirtableMerger() {
             // Simple merge: if lengths are significantly different, the longer one wins
             // Or if new notes seem more complete, use them
             if (newNotes.length > existingNotes.length * 1.1) {
-              mergedFields[airtableField] = newNotes;
-              fieldsToUpdate++;
+              recordFieldChange(airtableField, existingNotes, newNotes, 'Case notes updated - new version more complete');
             }
           }
           return;
@@ -3195,8 +3678,7 @@ function ClioAirtableMerger() {
         // Special handling for Matter_Flatpack - prefer new value as it's more current
         if (ourField === 'Matter_Flatpack') {
           if (!existingValue || existingValue === '{}' || existingValue === '') {
-            mergedFields[airtableField] = newValue;
-            fieldsToUpdate++;
+            recordFieldChange(airtableField, existingValue, newValue, 'Matter flatpack data populated');
           } else {
             // Try to merge JSON data
             try {
@@ -3204,14 +3686,12 @@ function ClioAirtableMerger() {
               const newData = JSON.parse(newValue);
               // Prefer new data but keep existing if new is empty
               if (Object.keys(newData).length > Object.keys(existingData).length) {
-                mergedFields[airtableField] = newValue;
-                fieldsToUpdate++;
+                recordFieldChange(airtableField, existingValue, newValue, `Matter flatpack updated (${Object.keys(newData).length} keys vs ${Object.keys(existingData).length})`);
               }
             } catch (e) {
               // If parse fails, use new value if existing is empty
               if (!existingValue) {
-                mergedFields[airtableField] = newValue;
-                fieldsToUpdate++;
+                recordFieldChange(airtableField, existingValue, newValue, 'Matter flatpack data set (parse error on existing)');
               }
             }
           }
@@ -3220,8 +3700,7 @@ function ClioAirtableMerger() {
 
         // For all other fields: fill in empty values, or update if different
         if (!existingValue || existingValue === '') {
-          mergedFields[airtableField] = newValue;
-          fieldsToUpdate++;
+          recordFieldChange(airtableField, existingValue, newValue, `Field populated from Clio (${ourField})`);
         }
       });
 
@@ -3247,23 +3726,20 @@ function ClioAirtableMerger() {
           const newLinks = Array.isArray(newValue) ? newValue : (newValue ? [newValue] : []);
           const existingLinks = existingValue || [];
           if (newLinks.length > 0 && (!existingLinks.length || newLinks[0] !== existingLinks[0])) {
-            mergedFields[config.fieldName] = newLinks;
-            fieldsToUpdate++;
+            recordFieldChange(config.fieldName, existingLinks, newLinks, `Link field updated (${config.fieldType})`);
           }
         } else if (config.fieldType === 'checkbox') {
           // Only update checkbox if currently false/empty
           if (!existingValue && newValue) {
-            mergedFields[config.fieldName] = Boolean(newValue);
-            fieldsToUpdate++;
+            recordFieldChange(config.fieldName, existingValue, Boolean(newValue), 'Checkbox set to true');
           }
         } else if (!existingValue || existingValue === '') {
           // Fill in empty values for text, number, etc.
-          mergedFields[config.fieldName] = newValue;
-          fieldsToUpdate++;
+          recordFieldChange(config.fieldName, existingValue, newValue, `Field populated (${config.fieldType})`);
         }
       });
 
-      return { mergedFields, fieldsToUpdate };
+      return { mergedFields, fieldsToUpdate, fieldChanges };
     };
 
     const preview = { new: [], existing: [], errors: [] };
@@ -3286,8 +3762,8 @@ function ClioAirtableMerger() {
       const existingRecord = clioMatterIdLookup.get(normalizedMatterId);
 
       if (existingRecord) {
-        // Compute what fields would be merged
-        const { mergedFields, fieldsToUpdate } = computeMergedFields(record, existingRecord);
+        // Compute what fields would be merged (now also returns fieldChanges for history)
+        const { mergedFields, fieldsToUpdate, fieldChanges } = computeMergedFields(record, existingRecord);
         totalFieldsToMerge += fieldsToUpdate;
 
         preview.existing.push({
@@ -3297,7 +3773,8 @@ function ClioAirtableMerger() {
           matchedField: 'clio_matter_id',
           matchedValue: matterId,
           mergedFields, // Fields that will be updated
-          fieldsToUpdate // Count of fields to update
+          fieldsToUpdate, // Count of fields to update
+          fieldChanges // Field change history with old/new values and reasons
         });
       } else {
         preview.new.push({
@@ -3394,6 +3871,28 @@ function ClioAirtableMerger() {
         updated += result.records.length;
         addPhase2Log(`Merge batch ${Math.floor(i/10) + 1}: Updated ${result.records.length} records`, 'success');
 
+        // Record field history for each successfully updated record
+        batch.forEach((item, batchIdx) => {
+          if (item.fieldChanges && Object.keys(item.fieldChanges).length > 0) {
+            const recordId = item.existingRecord.id;
+            const recordIdentifier = item.matchedValue || item.existingRecord.fields['clio_matter_id'] || recordId;
+
+            fieldHistoryManager.recordBatchChanges(
+              recordId,
+              recordIdentifier,
+              'Case Master View',
+              item.fieldChanges,
+              'Phase 2 Merge - Clio Matters',
+              'MERGE',
+              {
+                sourceIndex: item.sourceIndex,
+                batchNumber: Math.floor(i/10) + 1,
+                testMode: testMode
+              }
+            );
+          }
+        });
+
         setPhase2Sync(prev => ({
           ...prev,
           progress: { ...prev.progress, current: i + batch.length }
@@ -3406,6 +3905,10 @@ function ClioAirtableMerger() {
       // Rate limiting: 250ms between batches (Airtable allows 5 req/sec)
       await new Promise(resolve => setTimeout(resolve, 250));
     }
+
+    // Log history stats after merge
+    const historyStats = fieldHistoryManager.getStats();
+    addPhase2Log(`Field history: ${historyStats.totalChanges} total changes tracked across ${historyStats.recordsAffected} records`, 'info');
 
     setPhase2Sync(prev => ({
       ...prev,
@@ -4787,13 +5290,26 @@ function ClioAirtableMerger() {
             { num: 3, label: 'Phase 3: Events & Relationships', desc: 'Events + Related Contacts' },
             { num: 4, label: 'Phase 4: Case Notes', desc: 'Notes → Xano' },
             { num: 5, label: 'Dev Tools', desc: 'Schema & Record Lookup' },
-          ].map(({ num, label, desc }) => (
+            { num: 6, label: 'Audit Log', desc: 'Field History & Provenance', badge: auditStats.totalChanges > 0 ? auditStats.totalChanges : null },
+          ].map(({ num, label, desc, badge }) => (
             <div
               key={num}
               className={`phase-tab ${activePhase === num ? 'active' : ''}`}
-              onClick={() => setActivePhase(num)}
+              onClick={() => { setActivePhase(num); if (num === 6) refreshAuditStats(); }}
             >
-              <div style={{ fontWeight: 600 }}>{label}</div>
+              <div style={{ fontWeight: 600, display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                {label}
+                {badge && (
+                  <span style={{
+                    background: 'linear-gradient(135deg, #22c55e 0%, #16a34a 100%)',
+                    color: 'white',
+                    fontSize: '0.65rem',
+                    padding: '0.1rem 0.4rem',
+                    borderRadius: '9999px',
+                    fontWeight: 600
+                  }}>{badge}</span>
+                )}
+              </div>
               <div style={{ fontSize: '0.75rem', color: '#71717a' }}>{desc}</div>
             </div>
           ))}
@@ -7248,6 +7764,308 @@ function ClioAirtableMerger() {
                   ))}
                 </div>
               </div>
+            </div>
+          )}
+
+          {/* Phase 6: Audit Log */}
+          {activePhase === 6 && (
+            <div>
+              <h2 style={{ marginBottom: '1rem', fontSize: '1.25rem', display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                Field History & Provenance
+                <span style={{
+                  background: 'linear-gradient(135deg, #22c55e 0%, #16a34a 100%)',
+                  color: 'white',
+                  fontSize: '0.75rem',
+                  padding: '0.25rem 0.75rem',
+                  borderRadius: '9999px',
+                  fontWeight: 600
+                }}>
+                  {auditStats.totalChanges} changes
+                </span>
+              </h2>
+              <p style={{ color: '#71717a', marginBottom: '1.5rem', fontSize: '0.875rem' }}>
+                Complete audit trail of all field changes. Track when fields were modified, what the old and new values were,
+                and the source of each change for full provenance and auditability.
+              </p>
+
+              {/* Stats Overview */}
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '1rem', marginBottom: '1.5rem' }}>
+                <div style={{ background: 'rgba(99, 102, 241, 0.1)', border: '1px solid rgba(99, 102, 241, 0.3)', borderRadius: '8px', padding: '1rem', textAlign: 'center' }}>
+                  <div style={{ fontSize: '2rem', fontWeight: 700, color: '#818cf8' }}>{auditStats.totalChanges}</div>
+                  <div style={{ fontSize: '0.75rem', color: '#a1a1aa' }}>Total Changes</div>
+                </div>
+                <div style={{ background: 'rgba(168, 85, 247, 0.1)', border: '1px solid rgba(168, 85, 247, 0.3)', borderRadius: '8px', padding: '1rem', textAlign: 'center' }}>
+                  <div style={{ fontSize: '2rem', fontWeight: 700, color: '#a78bfa' }}>{auditStats.recordsAffected}</div>
+                  <div style={{ fontSize: '0.75rem', color: '#a1a1aa' }}>Records Modified</div>
+                </div>
+                <div style={{ background: 'rgba(236, 72, 153, 0.1)', border: '1px solid rgba(236, 72, 153, 0.3)', borderRadius: '8px', padding: '1rem', textAlign: 'center' }}>
+                  <div style={{ fontSize: '2rem', fontWeight: 700, color: '#f472b6' }}>{Object.keys(auditStats.changesByTable || {}).length}</div>
+                  <div style={{ fontSize: '0.75rem', color: '#a1a1aa' }}>Tables Affected</div>
+                </div>
+                <div style={{ background: 'rgba(34, 197, 94, 0.1)', border: '1px solid rgba(34, 197, 94, 0.3)', borderRadius: '8px', padding: '1rem', textAlign: 'center' }}>
+                  <div style={{ fontSize: '2rem', fontWeight: 700, color: '#4ade80' }}>{Object.keys(auditStats.changesBySource || {}).length}</div>
+                  <div style={{ fontSize: '0.75rem', color: '#a1a1aa' }}>Data Sources</div>
+                </div>
+              </div>
+
+              {/* Breakdown Cards */}
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '1rem', marginBottom: '1.5rem' }}>
+                {/* By Table */}
+                <div style={{ background: 'rgba(0, 0, 0, 0.2)', borderRadius: '8px', padding: '1rem' }}>
+                  <h4 style={{ fontSize: '0.85rem', color: '#a5b4fc', marginBottom: '0.75rem' }}>Changes by Table</h4>
+                  {Object.entries(auditStats.changesByTable || {}).length === 0 ? (
+                    <div style={{ color: '#71717a', fontSize: '0.8rem' }}>No changes recorded yet</div>
+                  ) : (
+                    Object.entries(auditStats.changesByTable || {}).map(([table, count]) => (
+                      <div key={table} style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.8rem', marginBottom: '0.25rem' }}>
+                        <span style={{ color: '#a1a1aa' }}>{table}</span>
+                        <span style={{ color: '#818cf8', fontWeight: 600 }}>{count}</span>
+                      </div>
+                    ))
+                  )}
+                </div>
+
+                {/* By Source */}
+                <div style={{ background: 'rgba(0, 0, 0, 0.2)', borderRadius: '8px', padding: '1rem' }}>
+                  <h4 style={{ fontSize: '0.85rem', color: '#c4b5fd', marginBottom: '0.75rem' }}>Changes by Source</h4>
+                  {Object.entries(auditStats.changesBySource || {}).length === 0 ? (
+                    <div style={{ color: '#71717a', fontSize: '0.8rem' }}>No changes recorded yet</div>
+                  ) : (
+                    Object.entries(auditStats.changesBySource || {}).map(([source, count]) => (
+                      <div key={source} style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.8rem', marginBottom: '0.25rem' }}>
+                        <span style={{ color: '#a1a1aa' }}>{source}</span>
+                        <span style={{ color: '#a78bfa', fontWeight: 600 }}>{count}</span>
+                      </div>
+                    ))
+                  )}
+                </div>
+
+                {/* By Operation */}
+                <div style={{ background: 'rgba(0, 0, 0, 0.2)', borderRadius: '8px', padding: '1rem' }}>
+                  <h4 style={{ fontSize: '0.85rem', color: '#f9a8d4', marginBottom: '0.75rem' }}>Changes by Operation</h4>
+                  {Object.entries(auditStats.changesByOperation || {}).length === 0 ? (
+                    <div style={{ color: '#71717a', fontSize: '0.8rem' }}>No changes recorded yet</div>
+                  ) : (
+                    Object.entries(auditStats.changesByOperation || {}).map(([op, count]) => (
+                      <div key={op} style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.8rem', marginBottom: '0.25rem' }}>
+                        <span style={{ color: '#a1a1aa' }}>{op}</span>
+                        <span style={{ color: '#f472b6', fontWeight: 600 }}>{count}</span>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+
+              {/* Export & Actions */}
+              <div style={{ display: 'flex', gap: '0.75rem', marginBottom: '1.5rem', flexWrap: 'wrap' }}>
+                <button className="btn btn-primary" onClick={exportAuditJSON} disabled={auditStats.totalChanges === 0}>
+                  Export JSON
+                </button>
+                <button className="btn btn-primary" onClick={exportAuditCSV} disabled={auditStats.totalChanges === 0} style={{ background: 'linear-gradient(135deg, #a855f7 0%, #c084fc 100%)' }}>
+                  Export CSV
+                </button>
+                <button className="btn btn-primary" onClick={refreshAuditStats} style={{ background: 'linear-gradient(135deg, #22c55e 0%, #16a34a 100%)' }}>
+                  Refresh Stats
+                </button>
+                <button className="btn btn-primary" onClick={clearAuditHistory} disabled={auditStats.totalChanges === 0} style={{ background: 'linear-gradient(135deg, #ef4444 0%, #dc2626 100%)' }}>
+                  Clear History
+                </button>
+              </div>
+
+              {/* Filters */}
+              <div style={{ background: 'rgba(0, 0, 0, 0.2)', borderRadius: '8px', padding: '1rem', marginBottom: '1.5rem' }}>
+                <h4 style={{ fontSize: '0.85rem', color: '#a5b4fc', marginBottom: '0.75rem' }}>Filter History</h4>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: '0.75rem' }}>
+                  <div>
+                    <label style={{ display: 'block', fontSize: '0.7rem', color: '#71717a', marginBottom: '0.25rem' }}>Search</label>
+                    <input
+                      type="text"
+                      placeholder="Record ID, field, value..."
+                      value={auditFilters.searchQuery}
+                      onChange={(e) => setAuditFilters(prev => ({ ...prev, searchQuery: e.target.value }))}
+                      style={{
+                        width: '100%',
+                        padding: '0.375rem 0.5rem',
+                        borderRadius: '4px',
+                        border: '1px solid rgba(255, 255, 255, 0.15)',
+                        background: 'rgba(0, 0, 0, 0.3)',
+                        color: '#e4e4e7',
+                        fontSize: '0.8rem',
+                      }}
+                    />
+                  </div>
+                  <div>
+                    <label style={{ display: 'block', fontSize: '0.7rem', color: '#71717a', marginBottom: '0.25rem' }}>Table</label>
+                    <select
+                      value={auditFilters.tableName}
+                      onChange={(e) => setAuditFilters(prev => ({ ...prev, tableName: e.target.value }))}
+                      style={{
+                        width: '100%',
+                        padding: '0.375rem 0.5rem',
+                        borderRadius: '4px',
+                        border: '1px solid rgba(255, 255, 255, 0.15)',
+                        background: 'rgba(0, 0, 0, 0.3)',
+                        color: '#e4e4e7',
+                        fontSize: '0.8rem',
+                      }}
+                    >
+                      <option value="">All Tables</option>
+                      {Object.keys(auditStats.changesByTable || {}).map(table => (
+                        <option key={table} value={table}>{table}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label style={{ display: 'block', fontSize: '0.7rem', color: '#71717a', marginBottom: '0.25rem' }}>Source</label>
+                    <select
+                      value={auditFilters.source}
+                      onChange={(e) => setAuditFilters(prev => ({ ...prev, source: e.target.value }))}
+                      style={{
+                        width: '100%',
+                        padding: '0.375rem 0.5rem',
+                        borderRadius: '4px',
+                        border: '1px solid rgba(255, 255, 255, 0.15)',
+                        background: 'rgba(0, 0, 0, 0.3)',
+                        color: '#e4e4e7',
+                        fontSize: '0.8rem',
+                      }}
+                    >
+                      <option value="">All Sources</option>
+                      {Object.keys(auditStats.changesBySource || {}).map(source => (
+                        <option key={source} value={source}>{source}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label style={{ display: 'block', fontSize: '0.7rem', color: '#71717a', marginBottom: '0.25rem' }}>Operation</label>
+                    <select
+                      value={auditFilters.operation}
+                      onChange={(e) => setAuditFilters(prev => ({ ...prev, operation: e.target.value }))}
+                      style={{
+                        width: '100%',
+                        padding: '0.375rem 0.5rem',
+                        borderRadius: '4px',
+                        border: '1px solid rgba(255, 255, 255, 0.15)',
+                        background: 'rgba(0, 0, 0, 0.3)',
+                        color: '#e4e4e7',
+                        fontSize: '0.8rem',
+                      }}
+                    >
+                      <option value="">All Operations</option>
+                      <option value="CREATE">CREATE</option>
+                      <option value="UPDATE">UPDATE</option>
+                      <option value="MERGE">MERGE</option>
+                      <option value="DELETE">DELETE</option>
+                    </select>
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'flex-end' }}>
+                    <button
+                      className="btn"
+                      onClick={() => setAuditFilters({ tableName: '', source: '', operation: '', fieldName: '', searchQuery: '' })}
+                      style={{
+                        width: '100%',
+                        background: 'rgba(255, 255, 255, 0.1)',
+                        color: '#a1a1aa',
+                        padding: '0.375rem 0.5rem',
+                        fontSize: '0.8rem'
+                      }}
+                    >
+                      Clear Filters
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              {/* Recent Changes Table */}
+              <div style={{ background: 'rgba(0, 0, 0, 0.2)', borderRadius: '8px', overflow: 'hidden' }}>
+                <div style={{ padding: '0.75rem 1rem', borderBottom: '1px solid rgba(255, 255, 255, 0.1)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <h4 style={{ fontSize: '0.85rem', color: '#a5b4fc', margin: 0 }}>Change History (Most Recent 100)</h4>
+                  <span style={{ fontSize: '0.75rem', color: '#71717a' }}>{getFilteredHistory().length} entries</span>
+                </div>
+                <div style={{ maxHeight: '400px', overflowY: 'auto' }}>
+                  {getFilteredHistory().length === 0 ? (
+                    <div style={{ padding: '2rem', textAlign: 'center', color: '#71717a' }}>
+                      No changes recorded yet. Changes will appear here after merging records.
+                    </div>
+                  ) : (
+                    <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.75rem' }}>
+                      <thead style={{ background: 'rgba(0, 0, 0, 0.3)', position: 'sticky', top: 0 }}>
+                        <tr>
+                          <th style={{ padding: '0.5rem', textAlign: 'left', color: '#a1a1aa', fontWeight: 600 }}>Time</th>
+                          <th style={{ padding: '0.5rem', textAlign: 'left', color: '#a1a1aa', fontWeight: 600 }}>Record</th>
+                          <th style={{ padding: '0.5rem', textAlign: 'left', color: '#a1a1aa', fontWeight: 600 }}>Field</th>
+                          <th style={{ padding: '0.5rem', textAlign: 'left', color: '#a1a1aa', fontWeight: 600 }}>Old Value</th>
+                          <th style={{ padding: '0.5rem', textAlign: 'left', color: '#a1a1aa', fontWeight: 600 }}>New Value</th>
+                          <th style={{ padding: '0.5rem', textAlign: 'left', color: '#a1a1aa', fontWeight: 600 }}>Source</th>
+                          <th style={{ padding: '0.5rem', textAlign: 'left', color: '#a1a1aa', fontWeight: 600 }}>Type</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {getFilteredHistory().map((entry, idx) => (
+                          <tr key={entry.id || idx} style={{ borderBottom: '1px solid rgba(255, 255, 255, 0.05)' }}>
+                            <td style={{ padding: '0.5rem', color: '#71717a' }}>
+                              {new Date(entry.timestamp).toLocaleString()}
+                            </td>
+                            <td style={{ padding: '0.5rem', color: '#818cf8' }}>
+                              <span title={entry.recordId}>{entry.recordIdentifier || entry.recordId?.slice(0, 10)}</span>
+                            </td>
+                            <td style={{ padding: '0.5rem', color: '#c4b5fd' }}>{entry.fieldName}</td>
+                            <td style={{ padding: '0.5rem', color: '#f87171', maxWidth: '150px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={entry.oldValueDisplay}>
+                              {entry.oldValueDisplay}
+                            </td>
+                            <td style={{ padding: '0.5rem', color: '#4ade80', maxWidth: '150px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={entry.newValueDisplay}>
+                              {entry.newValueDisplay}
+                            </td>
+                            <td style={{ padding: '0.5rem', color: '#a1a1aa' }}>{entry.source}</td>
+                            <td style={{ padding: '0.5rem' }}>
+                              <span style={{
+                                display: 'inline-block',
+                                padding: '0.1rem 0.4rem',
+                                borderRadius: '4px',
+                                fontSize: '0.65rem',
+                                fontWeight: 600,
+                                background: entry.changeType === 'POPULATED' ? 'rgba(34, 197, 94, 0.2)' :
+                                           entry.changeType === 'MODIFIED' ? 'rgba(99, 102, 241, 0.2)' :
+                                           entry.changeType === 'CLEARED' ? 'rgba(239, 68, 68, 0.2)' : 'rgba(255, 255, 255, 0.1)',
+                                color: entry.changeType === 'POPULATED' ? '#4ade80' :
+                                       entry.changeType === 'MODIFIED' ? '#818cf8' :
+                                       entry.changeType === 'CLEARED' ? '#f87171' : '#a1a1aa'
+                              }}>
+                                {entry.changeType}
+                              </span>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  )}
+                </div>
+              </div>
+
+              {/* Recent Changes Summary */}
+              {auditStats.recentChanges?.length > 0 && (
+                <div style={{ marginTop: '1.5rem' }}>
+                  <h4 style={{ fontSize: '0.85rem', color: '#a5b4fc', marginBottom: '0.75rem' }}>Recent Activity Summary</h4>
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '0.5rem' }}>
+                    {auditStats.recentChanges.slice(0, 6).map((entry, idx) => (
+                      <div key={idx} style={{ background: 'rgba(0, 0, 0, 0.2)', borderRadius: '6px', padding: '0.75rem', fontSize: '0.75rem' }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.25rem' }}>
+                          <span style={{ color: '#818cf8', fontWeight: 600 }}>{entry.fieldName}</span>
+                          <span style={{ color: '#71717a' }}>{new Date(entry.timestamp).toLocaleTimeString()}</span>
+                        </div>
+                        <div style={{ color: '#a1a1aa' }}>
+                          <span style={{ color: '#f87171' }}>{entry.oldValueDisplay?.slice(0, 30)}</span>
+                          <span style={{ margin: '0 0.5rem' }}>→</span>
+                          <span style={{ color: '#4ade80' }}>{entry.newValueDisplay?.slice(0, 30)}</span>
+                        </div>
+                        {entry.reason && (
+                          <div style={{ color: '#71717a', fontStyle: 'italic', marginTop: '0.25rem' }}>{entry.reason}</div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
           )}
         </div>
