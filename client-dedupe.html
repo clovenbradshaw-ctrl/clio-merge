@@ -336,7 +336,88 @@ class AirtableClient {
 
     return results;
   }
+
+  async updateRecord(tableName, recordId, fields, logCallback = null) {
+    try {
+      const result = await this.request(`/${encodeURIComponent(tableName)}/${recordId}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ fields }),
+      });
+      return result;
+    } catch (err) {
+      if (logCallback) {
+        logCallback(`Failed to update record ${recordId}: ${err.message}`, 'error');
+      }
+      throw err;
+    }
+  }
 }
+
+// ============================================
+// MERGE LOGIC
+// ============================================
+
+// Fields that are link arrays (need to combine unique IDs)
+const LINK_FIELDS = ['Case Master View', 'Events', 'Relationships', 'Client Notes', 'Matters'];
+
+// Fields that are simple text/values (prefer non-empty)
+const TEXT_FIELDS = [
+  'A#', 'DOB', 'Phone Number', 'Client Email', 'Address', 'Address Line 1',
+  'City', 'State', 'Zip (5)', 'Country', 'Entry Date', 'PPID',
+  'Box_Folder_ID', 'box_shared_link', 'Box Legacy ID', 'clio_contact_id',
+  'Client ID', 'First Name', 'Middle Name', 'Family Name'
+];
+
+// Compute merged fields from keep record + all duplicate records
+const computeMergedFields = (keepRecord, deleteRecords) => {
+  const mergedFields = {};
+  const keepFields = keepRecord.record.fields || {};
+
+  // Start with all records (keep + duplicates)
+  const allRecords = [keepRecord, ...deleteRecords];
+
+  // Merge link fields (combine all unique IDs)
+  LINK_FIELDS.forEach(field => {
+    const allIds = new Set();
+    allRecords.forEach(r => {
+      const ids = r.record.fields[field] || [];
+      ids.forEach(id => allIds.add(id));
+    });
+
+    const currentIds = keepFields[field] || [];
+    const mergedIds = Array.from(allIds);
+
+    // Only include if there are new IDs to add
+    if (mergedIds.length > currentIds.length) {
+      mergedFields[field] = mergedIds;
+    }
+  });
+
+  // Merge text fields (prefer non-empty values, keep record takes priority)
+  TEXT_FIELDS.forEach(field => {
+    const keepValue = keepFields[field];
+
+    // If keep record already has a value, don't overwrite
+    if (keepValue && String(keepValue).trim()) {
+      return;
+    }
+
+    // Find first non-empty value from duplicates
+    for (const dr of deleteRecords) {
+      const dupValue = dr.record.fields[field];
+      if (dupValue && String(dupValue).trim()) {
+        // Skip invalid emails
+        if (field === 'Client Email' && String(dupValue).includes('null@blank')) {
+          continue;
+        }
+        mergedFields[field] = dupValue;
+        break;
+      }
+    }
+  });
+
+  return mergedFields;
+};
 
 // ============================================
 // NAME NORMALIZATION
@@ -764,54 +845,98 @@ function App() {
     addLog(`Exported ${ids.length} record IDs to JSON`, 'success');
   };
 
-  // Actually delete records from Airtable
-  const deleteRecordsFromAirtable = async () => {
-    if (recordsToDelete.length === 0) {
-      addLog('No records to delete', 'warning');
+  // Merge and delete records from Airtable
+  const mergeAndDeleteRecords = async () => {
+    if (duplicateGroups.length === 0) {
+      addLog('No duplicate groups to process', 'warning');
       return;
     }
 
-    if (!window.confirm(`Are you sure you want to delete ${recordsToDelete.length} records from Airtable? This cannot be undone!`)) {
+    if (!window.confirm(`This will:\n1. MERGE data from ${recordsToDelete.length} duplicates into ${duplicateGroups.length} kept records\n2. DELETE the ${recordsToDelete.length} duplicate records\n\nThis cannot be undone! Continue?`)) {
       return;
     }
 
-    if (!window.confirm(`FINAL WARNING: This will permanently delete ${recordsToDelete.length} records. Type 'yes' in the next prompt to confirm.`)) {
-      return;
-    }
-
-    const confirmation = window.prompt('Type "DELETE" to confirm deletion:');
-    if (confirmation !== 'DELETE') {
-      addLog('Deletion cancelled - confirmation not received', 'warning');
+    const confirmation = window.prompt('Type "MERGE" to confirm merge and deletion:');
+    if (confirmation !== 'MERGE') {
+      addLog('Operation cancelled - confirmation not received', 'warning');
       return;
     }
 
     setLoading(true);
-    addLog(`Starting deletion of ${recordsToDelete.length} records (one at a time)...`, 'warning');
-    addLog(`This will take approximately ${Math.ceil(recordsToDelete.length * 0.3)} seconds`, 'info');
+    const client = new AirtableClient(apiKey, baseId);
 
-    try {
-      const client = new AirtableClient(apiKey, baseId);
-      const idsToDelete = recordsToDelete.map(dr => dr.record.id);
-      const recordsInfo = recordsToDelete.map(dr => ({
-        name: dr.name,
-        score: dr.score,
-        aNumber: dr.record.fields['A#'] || '',
-      }));
+    // Phase 1: Merge data into kept records
+    addLog(``, 'info');
+    addLog(`========================================`, 'info');
+    addLog(`PHASE 1: Merging data into ${duplicateGroups.length} kept records...`, 'info');
+    addLog(`========================================`, 'info');
 
-      const results = await client.deleteRecords(CLIENT_INFO_TABLE, idsToDelete, recordsInfo, addLog);
+    let mergeSuccessCount = 0;
+    let mergeErrorCount = 0;
 
-      addLog(``, 'info');
-      addLog(`========================================`, 'success');
-      addLog(`Deletion complete: ${results.length} of ${recordsToDelete.length} records deleted`, 'success');
-      addLog(`========================================`, 'success');
+    for (let i = 0; i < duplicateGroups.length; i++) {
+      const group = duplicateGroups[i];
+      const keepRecordId = group.keepRecord.record.id;
+      const clientName = group.keepRecord.name;
 
-      // Refresh the data
-      await fetchAllClients();
-    } catch (err) {
-      addLog(`Error during deletion: ${err.message}`, 'error');
-    } finally {
-      setLoading(false);
+      // Compute merged fields
+      const mergedFields = computeMergedFields(group.keepRecord, group.deleteRecords);
+
+      if (Object.keys(mergedFields).length === 0) {
+        addLog(`[${i + 1}/${duplicateGroups.length}] ${clientName}: No new data to merge`, 'info');
+        continue;
+      }
+
+      // Log what's being merged
+      const fieldsSummary = Object.keys(mergedFields).map(f => {
+        const val = mergedFields[f];
+        if (Array.isArray(val)) {
+          return `${f}: +${val.length - (group.keepRecord.record.fields[f] || []).length} links`;
+        }
+        return f;
+      }).join(', ');
+
+      addLog(`[${i + 1}/${duplicateGroups.length}] Merging into ${clientName}: ${fieldsSummary}`, 'info');
+
+      try {
+        await client.updateRecord(CLIENT_INFO_TABLE, keepRecordId, mergedFields, addLog);
+        addLog(`[${i + 1}/${duplicateGroups.length}] ✓ Successfully merged: ${clientName}`, 'success');
+        mergeSuccessCount++;
+      } catch (err) {
+        addLog(`[${i + 1}/${duplicateGroups.length}] ✗ Failed to merge ${clientName}: ${err.message}`, 'error');
+        mergeErrorCount++;
+      }
+
+      // Rate limiting
+      await new Promise(r => setTimeout(r, 250));
     }
+
+    addLog(``, 'info');
+    addLog(`Merge phase complete: ${mergeSuccessCount} successful, ${mergeErrorCount} errors`, mergeErrorCount > 0 ? 'warning' : 'success');
+
+    // Phase 2: Delete duplicate records
+    addLog(``, 'info');
+    addLog(`========================================`, 'info');
+    addLog(`PHASE 2: Deleting ${recordsToDelete.length} duplicate records...`, 'warning');
+    addLog(`========================================`, 'info');
+
+    const idsToDelete = recordsToDelete.map(dr => dr.record.id);
+    const recordsInfo = recordsToDelete.map(dr => ({
+      name: dr.name,
+      score: dr.score,
+      aNumber: dr.record.fields['A#'] || '',
+    }));
+
+    const results = await client.deleteRecords(CLIENT_INFO_TABLE, idsToDelete, recordsInfo, addLog);
+
+    addLog(``, 'info');
+    addLog(`========================================`, 'success');
+    addLog(`COMPLETE: Merged ${mergeSuccessCount} records, deleted ${results.length} duplicates`, 'success');
+    addLog(`========================================`, 'success');
+
+    // Refresh the data
+    setLoading(false);
+    await fetchAllClients();
   };
 
   // Filter duplicate groups based on current filters
@@ -831,7 +956,7 @@ function App() {
   return (
     <div className="container">
       <h1>Bahr Client Deduplication Tool</h1>
-      <p className="subtitle">Find and remove duplicate Bahr client records</p>
+      <p className="subtitle">Find, merge, and remove duplicate Bahr client records</p>
 
       {/* API Configuration */}
       <div className="card">
@@ -1085,14 +1210,15 @@ function App() {
           <div style={{ borderTop: '1px solid #475569', paddingTop: '20px' }}>
             <h3 style={{ color: '#ef4444' }}>Danger Zone</h3>
             <p style={{ color: '#94a3b8', marginBottom: '15px' }}>
-              These actions cannot be undone. Make sure to export and review before proceeding.
+              This will MERGE all data (Case Master Views, Events, Relationships, Notes, Matters, and text fields)
+              from duplicates into the kept records, then DELETE the duplicates. This cannot be undone.
             </p>
             <button
               className="danger"
-              onClick={deleteRecordsFromAirtable}
-              disabled={loading || recordsToDelete.length === 0}
+              onClick={mergeAndDeleteRecords}
+              disabled={loading || duplicateGroups.length === 0}
             >
-              Delete {recordsToDelete.length} Duplicate Records from Airtable
+              Merge & Delete: {duplicateGroups.length} groups ({recordsToDelete.length} duplicates)
             </button>
           </div>
         </div>
