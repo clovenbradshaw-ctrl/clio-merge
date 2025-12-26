@@ -492,10 +492,10 @@ function App() {
     setLogs([]);
   }, []);
 
-  // Build filter formula for Bahr clients created yesterday or today
-  const buildBahrDateFilter = () => {
-    // Filter: Bahr Client = true AND Created At is yesterday or today
-    return `AND({Bahr Client}, OR(IS_SAME(CREATED_TIME(), TODAY(), 'day'), IS_SAME(CREATED_TIME(), DATEADD(TODAY(), -1, 'day'), 'day')))`;
+  // Build filter formula for Bahr clients (all time)
+  const buildBahrFilter = () => {
+    // Filter: Bahr Client = true (no date restriction)
+    return `{Bahr Client}`;
   };
 
   // Fetch all client records
@@ -507,12 +507,12 @@ function App() {
 
     setLoading(true);
     clearLogs();
-    addLog('Fetching Bahr clients created yesterday or today...', 'info');
+    addLog('Fetching all Bahr clients...', 'info');
     setProgress({ current: 0, total: 0, phase: 'Fetching records' });
 
     try {
       const client = new AirtableClient(apiKey, baseId);
-      const filterFormula = buildBahrDateFilter();
+      const filterFormula = buildBahrFilter();
       addLog(`Filter: ${filterFormula}`, 'info');
       const records = await client.getAllRecords(CLIENT_INFO_TABLE, FIELDS_TO_FETCH, filterFormula, addLog);
 
@@ -831,7 +831,7 @@ function App() {
   return (
     <div className="container">
       <h1>Bahr Client Deduplication Tool</h1>
-      <p className="subtitle">Find and remove duplicate Bahr client records created yesterday or today</p>
+      <p className="subtitle">Find and remove duplicate Bahr client records</p>
 
       {/* API Configuration */}
       <div className="card">
@@ -856,7 +856,7 @@ function App() {
         </div>
         <div className="btn-group">
           <button className="primary" onClick={fetchAllClients} disabled={loading || !apiKey}>
-            {loading ? 'Loading...' : 'Fetch Bahr Clients (Yesterday/Today) & Find Duplicates'}
+            {loading ? 'Loading...' : 'Fetch All Bahr Clients & Find Duplicates'}
           </button>
         </div>
       </div>
@@ -939,7 +939,7 @@ function App() {
               Show only groups with Box folders
             </label>
             <span style={{ color: '#10b981', fontSize: '0.9em' }}>
-              (Showing only Bahr clients created yesterday or today)
+              (Showing Bahr clients only)
             </span>
           </div>
 
