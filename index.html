@@ -3400,6 +3400,71 @@ function ClioAirtableMerger() {
     setPhase2Report(reports);
   }, [phase2Data, phase2FieldMapping]);
 
+  // Download Phase 2 data as JSON with flatpack field
+  const downloadPhase2JSON = () => {
+    if (!phase2Result?.caseMaster?.length) {
+      alert('No data to download. Generate Case Master Views first.');
+      return;
+    }
+
+    // Build JSON array where each matter is the master object with all data flatpacked
+    const jsonData = phase2Result.caseMaster.map(record => {
+      // Build flatpack object with all data at the same level
+      const flatpackData = {
+        // Core matter identifiers
+        matterId: record.Matter_ID || record._matterId || '',
+        displayNumber: record.Display_Number || record._displayNumber || '',
+
+        // Client info
+        clientId: record.Client_ID || record._clientId || '',
+        clientName: record.Client_Name || record._client_name || '',
+        airtableRecordId: record.Airtable_Record_ID || record._client_record_id || '',
+
+        // Matter details
+        description: record.Description || '',
+        status: record.Status || '',
+        mappedStatus: record.Mapped_Status || '',
+        openDate: record.Open_Date || '',
+        closeDate: record.Close_Date || '',
+
+        // Notes - formatted as single field
+        notes: record.Notes || '',
+        noteCount: record.Note_Count || record._note_count || 0,
+      };
+
+      // Return the matter object with flatpack field containing all data as JSON string
+      return {
+        // Matter as the master object - all fields at same level
+        matterId: flatpackData.matterId,
+        displayNumber: flatpackData.displayNumber,
+        clientId: flatpackData.clientId,
+        clientName: flatpackData.clientName,
+        airtableRecordId: flatpackData.airtableRecordId,
+        description: flatpackData.description,
+        status: flatpackData.status,
+        mappedStatus: flatpackData.mappedStatus,
+        openDate: flatpackData.openDate,
+        closeDate: flatpackData.closeDate,
+        notes: flatpackData.notes,
+        noteCount: flatpackData.noteCount,
+        // Flatpack field with all data as JSON string
+        flatpack: JSON.stringify(flatpackData),
+      };
+    });
+
+    const json = JSON.stringify(jsonData, null, 2);
+    const blob = new Blob([json], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'case_master_views.json';
+    a.style.display = 'none';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
   // Upload Case Master Views to Airtable using field IDs
   const uploadCaseMasterViewsToAirtable = async (testMode = false) => {
     if (!phase2Result?.caseMaster?.length) {
@@ -5415,6 +5480,30 @@ function ClioAirtableMerger() {
                     </div>
                     <p style={{ fontSize: '0.7rem', color: '#71717a', marginTop: '0.75rem', marginBottom: 0 }}>
                       Merged data: Matter info + Notes + Airtable Record ID for client linking
+                    </p>
+                  </div>
+
+                  {/* JSON Download Section */}
+                  <div style={{ marginBottom: '1.5rem', padding: '1rem', background: 'rgba(99, 102, 241, 0.1)', borderRadius: '8px', border: '1px solid rgba(99, 102, 241, 0.3)' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.75rem' }}>
+                      <h4 style={{ color: '#a5b4fc', margin: 0, display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                        <span style={{ fontSize: '1.25rem' }}>📦</span> Download JSON
+                      </h4>
+                      <span style={{ fontSize: '0.75rem', color: '#94a3b8', background: '#1e293b', padding: '0.25rem 0.5rem', borderRadius: '4px' }}>
+                        Flatpacked format
+                      </span>
+                    </div>
+                    <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap' }}>
+                      <button
+                        className="btn btn-primary"
+                        onClick={downloadPhase2JSON}
+                        style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', background: '#6366f1' }}
+                      >
+                        <span>⬇</span> Download case_master_views.json
+                      </button>
+                    </div>
+                    <p style={{ fontSize: '0.7rem', color: '#71717a', marginTop: '0.75rem', marginBottom: 0 }}>
+                      Full data as JSON: Clio matters as master objects, merged Airtable data, formatted notes, and flatpack field
                     </p>
                   </div>
 
