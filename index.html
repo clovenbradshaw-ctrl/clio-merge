@@ -3442,10 +3442,10 @@ function ClioAirtableMerger() {
     // Note: Only includes fields that exist in the Airtable schema
     // Excluded computed fields (cannot write): PP ID, Client Name, Client ID, Note Count
     // Excluded non-existent fields: Status, Open Date, Close Date
+    // Excluded singleSelect fields: File Case Status (use schema mapping instead)
     const ourFieldToAirtable = {
       'Matter_ID': 'clio_matter_id',
       'Description': 'Description',
-      'Mapped_Status': 'File Case Status',
       'Notes': 'Case Notes',
       'Airtable_Record_ID': 'Edit Client Info', // Link field
     };
