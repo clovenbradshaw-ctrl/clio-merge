@@ -44,7 +44,7 @@ const XANO_CASE_NOTES_ENDPOINT = 'https://xvkq-pq7i-idtl.n7d.xano.io/api:l_gEBOG
 // Relevant Airtable tables for schema inspection
 const AIRTABLE_TABLES = {
   'Client Info': ['Client ID', 'A#', 'First Name', 'Middle Name', 'Family Name', 'Phone Number', 'Client Email', 'Address Line 1', 'Address Line 2', 'City', 'State', 'Zip (5)', 'Country', 'Entry Date', 'Place of Entry', 'DOB', 'clio_contact_id', 'Bahr Client', 'uscis_flatpack_data'],
-  'Case Master View': ['Client', 'clio_matter_id', 'Description', 'File Case Status', 'Case Notes', 'Bahr Client', 'Matter_Flatpack'], // PP ID removed - it's a computed field
+  'Case Master View': ['Edit Client Info', 'clio_matter_id', 'Description', 'File Case Status', 'Case Notes', 'Bahr Client', 'Matter_Flatpack'], // PP ID removed - it's a computed field
   'Events': ['Case Master', 'A#', 'Hearing Date/Time', 'Event Type', 'Event Hearing Type', 'Court', 'Judge', 'MCH Attny', 'Bahr Client'],
   'Relationships': ['Case Master View', 'Object Client', 'Relationship', 'Bahr Client'],
 };
@@ -2404,7 +2404,7 @@ function ClioAirtableMerger() {
       }
 
       const fields = {
-        'Client': [clientRecordId], // Link to Client Info
+        'Edit Client Info': [clientRecordId], // Link to Client Info
         'Description': event._eventDesc || `${event._parsedLastName}, ${event._parsedFirstName}`.trim(),
         'Bahr Client': true,
       };
@@ -2617,7 +2617,6 @@ function ClioAirtableMerger() {
         'File Case Status': '_mapped_status',
         'Case Notes': '_aggregated_notes',
         'Bahr Client': '_constant_true',
-        'Client': '_client_record_id',
         'Edit Client Info': '_client_record_id', // Link to Airtable client record
         'Matter_Flatpack': '_matter_flatpack_data',
       };
