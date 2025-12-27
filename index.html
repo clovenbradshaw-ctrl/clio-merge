@@ -4801,9 +4801,25 @@ function ClioAirtableMerger() {
         const recordId = row['Record ID'] || row['recordId'] || '';
         const clioMatterId = row['clio_matter_id'] || '';
         const displayNumber = row['PP ID'] || '';
-        const aNumber = row['A#'] || row['a_number'] || row['A Number'] || '';
         const description = row['Description'] || row['description'] || '';
         const clientName = row['Client Name'] || row['client_name'] || '';
+
+        // Parse Matter_Flatpack to get matterId and A#
+        let matterId = 0;
+        let aNumber = row['A#'] || row['a_number'] || row['A Number'] || '';
+        const flatpackRaw = row['Matter_Flatpack'] || row['matter_flatpack'] || '';
+        if (flatpackRaw) {
+          try {
+            const flatpack = JSON.parse(flatpackRaw);
+            matterId = parseInt(flatpack.matterId, 10) || 0;
+            // Use A# from flatpack if not found in row
+            if (!aNumber && flatpack.aNumber) {
+              aNumber = flatpack.aNumber;
+            }
+          } catch (e) {
+            // Parse failed, continue with row values
+          }
+        }
 
         if (clioMatterId && recordId) {
           clioMatterToRecordId.set(clioMatterId, recordId);
@@ -4826,6 +4842,7 @@ function ClioAirtableMerger() {
             description,
             clientName,
             ppId: displayNumber,
+            matterId, // Higher = more recent
           };
 
           // Store in array - one A# can have multiple Case Masters
@@ -4859,86 +4876,36 @@ function ClioAirtableMerger() {
           return;
         }
 
-        // Try to find Case Master View - prioritize A# matching with client name disambiguation
+        // Try to find Case Master View by A# - use highest matterId for most recent case
         let caseMasterRecordId = '';
         let matchedCaseMaster = null;
 
-        // 1. First try matching by A# from the event summary
-        if (summaryParsed.aNumber) {
-          const normalizedEventANum = summaryParsed.aNumber.replace(/[^0-9]/g, '');
-          const caseMasters = aNumberToCaseMasters.get(normalizedEventANum) || [];
+        const normalizedEventANum = summaryParsed.aNumber.replace(/[^0-9]/g, '');
+        const caseMasters = aNumberToCaseMasters.get(normalizedEventANum) || [];
 
-          if (caseMasters.length === 1) {
-            // Single match - use it
-            matchedCaseMaster = caseMasters[0];
-            caseMasterRecordId = matchedCaseMaster.recordId;
-          } else if (caseMasters.length > 1) {
-            // Multiple matches - try to disambiguate by client name from event summary
-            const eventClientName = summaryParsed.clientName || '';
-            const eventNameNormalized = eventClientName.toLowerCase().replace(/[^a-z]/g, '');
-
-            // Score each case master by name similarity
-            let bestMatch = null;
-            let bestScore = 0;
-
-            for (const cm of caseMasters) {
-              const cmNameNormalized = (cm.clientName || cm.description || '').toLowerCase().replace(/[^a-z]/g, '');
-
-              // Check for substring match or word overlap
-              let score = 0;
-              if (eventNameNormalized && cmNameNormalized) {
-                // Check if names contain each other
-                if (cmNameNormalized.includes(eventNameNormalized) || eventNameNormalized.includes(cmNameNormalized)) {
-                  score = 100;
-                } else {
-                  // Check word overlap
-                  const eventWords = eventClientName.toLowerCase().split(/[\s,]+/).filter(w => w.length > 2);
-                  const cmWords = (cm.clientName || cm.description || '').toLowerCase().split(/[\s,]+/).filter(w => w.length > 2);
-                  const overlap = eventWords.filter(w => cmWords.some(cw => cw.includes(w) || w.includes(cw))).length;
-                  score = overlap * 20;
-                }
-              }
-
-              if (score > bestScore) {
-                bestScore = score;
-                bestMatch = cm;
-              }
-            }
-
-            if (bestMatch && bestScore > 0) {
-              matchedCaseMaster = bestMatch;
-              caseMasterRecordId = bestMatch.recordId;
-              if (caseMasters.length > 1) {
-                reports.push({ type: 'info', message: `A# ${summaryParsed.aNumber}: matched "${eventClientName}" to "${bestMatch.clientName || bestMatch.ppId}" (${caseMasters.length} options)` });
-              }
-            } else {
-              // No good name match - use the first one and warn
-              matchedCaseMaster = caseMasters[0];
-              caseMasterRecordId = caseMasters[0].recordId;
-              reports.push({ type: 'warning', message: `A# ${summaryParsed.aNumber}: ${caseMasters.length} Case Masters found, using first (${caseMasters[0].ppId}). Event: "${eventClientName}"` });
-            }
-          }
-        }
-
-        // 2. Fallback to PP ID/matter ID if no A# match
-        if (!caseMasterRecordId && summaryParsed.matterId) {
-          caseMasterRecordId = displayNumberToRecordId.get(summaryParsed.matterId) || '';
-          if (!caseMasterRecordId) {
-            const numMatch = summaryParsed.matterId.match(/^(\d+)/);
-            if (numMatch) {
-              caseMasterRecordId = displayNumberToRecordId.get(numMatch[1]) || '';
-            }
-          }
+        if (caseMasters.length === 1) {
+          // Single match - use it
+          matchedCaseMaster = caseMasters[0];
+          caseMasterRecordId = matchedCaseMaster.recordId;
+        } else if (caseMasters.length > 1) {
+          // Multiple matches - pick the one with highest matterId (most recent)
+          const sorted = [...caseMasters].sort((a, b) => b.matterId - a.matterId);
+          matchedCaseMaster = sorted[0];
+          caseMasterRecordId = matchedCaseMaster.recordId;
+          reports.push({
+            type: 'info',
+            message: `A# ${summaryParsed.aNumber}: ${caseMasters.length} Case Masters, using most recent (matterId: ${matchedCaseMaster.matterId}, PP: ${matchedCaseMaster.ppId})`
+          });
         }
 
         if (caseMasterRecordId) {
           eventsLinked++;
         } else {
           eventsUnlinked++;
-          reports.push({ type: 'warning', message: `Event not linked to Case Master: A# ${summaryParsed.aNumber}` });
         }
 
         const court = location || descParsed.courtAddress || '';
+        const isOrphan = !caseMasterRecordId;
 
         eventsOutput.push({
           'Case Master': caseMasterRecordId ? [caseMasterRecordId] : [], // Link to Case Master View (must be array)
@@ -4951,10 +4918,13 @@ function ClioAirtableMerger() {
           'MCH Attny': [ANDREW_BAHR_RECORD_ID], // Link field (must be array)
           'Bahr Client': 'TRUE',
           '_summary': summary.slice(0, 100),
+          '_clientName': summaryParsed.clientName || '',
+          '_orphan': isOrphan,
+          '_matchedPpId': matchedCaseMaster?.ppId || '',
         });
       });
 
-      reports.push({ type: 'info', message: `Processed ${eventsOutput.length} events (${eventsLinked} linked, ${eventsUnlinked} unlinked)` });
+      reports.push({ type: 'info', message: `Processed ${eventsOutput.length} events (${eventsLinked} matched, ${eventsUnlinked} orphans)` });
     }
 
     // Process Relationships
@@ -7233,22 +7203,40 @@ function ClioAirtableMerger() {
 
                   {phase3Result.events.length > 0 && (
                     <div style={{ marginBottom: '1.5rem' }}>
-                      <h4 style={{ marginBottom: '0.5rem' }}>Events Preview</h4>
-                      <div className="table-container">
+                      {/* Event Analysis Summary */}
+                      <div style={{ display: 'flex', gap: '1rem', marginBottom: '1rem' }}>
+                        <div style={{ background: '#1e293b', padding: '0.75rem 1rem', borderRadius: '6px', flex: 1 }}>
+                          <div style={{ fontSize: '1.25rem', fontWeight: 'bold', color: '#10b981' }}>
+                            {phase3Result.events.filter(e => !e._orphan).length}
+                          </div>
+                          <div style={{ fontSize: '0.7rem', color: '#94a3b8' }}>Matched (have A# in Case Master)</div>
+                        </div>
+                        <div style={{ background: '#1e293b', padding: '0.75rem 1rem', borderRadius: '6px', flex: 1 }}>
+                          <div style={{ fontSize: '1.25rem', fontWeight: 'bold', color: '#f59e0b' }}>
+                            {phase3Result.events.filter(e => e._orphan).length}
+                          </div>
+                          <div style={{ fontSize: '0.7rem', color: '#94a3b8' }}>Orphans (A# not in Case Master)</div>
+                        </div>
+                      </div>
+
+                      <h4 style={{ marginBottom: '0.5rem' }}>Matched Events Preview</h4>
+                      <div className="table-container" style={{ marginBottom: '1rem' }}>
                         <table>
                           <thead>
                             <tr>
-                              <th>Case Master (Record ID)</th>
+                              <th>Client Name</th>
                               <th>A#</th>
+                              <th>Matched PP ID</th>
                               <th>Date/Time</th>
                               <th>Type</th>
                             </tr>
                           </thead>
                           <tbody>
-                            {phase3Result.events.slice(0, 5).map((row, i) => (
+                            {phase3Result.events.filter(e => !e._orphan).slice(0, 5).map((row, i) => (
                               <tr key={i}>
-                                <td style={{ fontFamily: 'monospace', fontSize: '0.7rem' }}>{row['Case Master'] ? row['Case Master'].slice(0, 12) + '...' : '—'}</td>
+                                <td>{row['_clientName'] || '—'}</td>
                                 <td>{row['A#']}</td>
+                                <td style={{ color: '#10b981' }}>{row['_matchedPpId'] || '—'}</td>
                                 <td>{row['Hearing Date/Time']?.slice(0, 16)}</td>
                                 <td>{row['Event Hearing Type']}</td>
                               </tr>
@@ -7256,6 +7244,34 @@ function ClioAirtableMerger() {
                           </tbody>
                         </table>
                       </div>
+
+                      {phase3Result.events.filter(e => e._orphan).length > 0 && (
+                        <>
+                          <h4 style={{ marginBottom: '0.5rem', color: '#f59e0b' }}>Orphan Events (no matching A#)</h4>
+                          <div className="table-container">
+                            <table>
+                              <thead>
+                                <tr>
+                                  <th>Client Name</th>
+                                  <th>A#</th>
+                                  <th>Date/Time</th>
+                                  <th>Type</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {phase3Result.events.filter(e => e._orphan).slice(0, 10).map((row, i) => (
+                                  <tr key={i} style={{ background: 'rgba(245, 158, 11, 0.1)' }}>
+                                    <td>{row['_clientName'] || '—'}</td>
+                                    <td style={{ color: '#f59e0b' }}>{row['A#']}</td>
+                                    <td>{row['Hearing Date/Time']?.slice(0, 16)}</td>
+                                    <td>{row['Event Hearing Type']}</td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        </>
+                      )}
                     </div>
                   )}
 
