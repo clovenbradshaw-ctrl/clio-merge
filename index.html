@@ -949,6 +949,132 @@ const parseEventDescription = (desc) => {
   return result;
 };
 
+// Parse HTML description and extract fields into separate columns
+const parseHtmlDescription = (desc) => {
+  if (!desc) return {
+    descHearingType: '',
+    descHearingFormat: '',
+    descHearingDate: '',
+    descHearingTime: '',
+    descJudge: '',
+    descCourtAddress: '',
+    descHearingLocation: '',
+    descAlienNames: '',
+    descPhoneNumber: '',
+    descPlainText: '',
+  };
+
+  // Helper to strip all HTML tags
+  const stripHtml = (html) => {
+    return html
+      .replace(/<br\s*\/?>/gi, '\n')
+      .replace(/<\/?(p|div|tr|td|li)[^>]*>/gi, '\n')
+      .replace(/<[^>]+>/g, '')
+      .replace(/&nbsp;/g, ' ')
+      .replace(/&amp;/g, '&')
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&quot;/g, '"')
+      .replace(/&#39;/g, "'")
+      .replace(/\n{3,}/g, '\n\n')
+      .trim();
+  };
+
+  const result = {
+    descHearingType: '',
+    descHearingFormat: '',
+    descHearingDate: '',
+    descHearingTime: '',
+    descJudge: '',
+    descCourtAddress: '',
+    descHearingLocation: '',
+    descAlienNames: '',
+    descPhoneNumber: '',
+    descPlainText: stripHtml(desc),
+  };
+
+  // Extract hearing type from pattern: "Your upcoming <strong>Individual</strong>" or "<strong>INDIVIDUAL</strong>"
+  const hearingTypeMatch = desc.match(/Your upcoming\s*<strong>([^<]+)<\/strong>/i) ||
+                           desc.match(/<strong>(Individual|Master|Bond|Status|ICH|MCH|IMH)<\/strong>/i);
+  if (hearingTypeMatch) {
+    result.descHearingType = hearingTypeMatch[1].trim();
+  }
+
+  // Extract hearing format (in person, telephonic, video, etc.)
+  const formatMatch = desc.match(/hearing is\s*<strong>([^<]+)<\/strong>/i) ||
+                      desc.match(/<strong>(in person|IN PERSON|telephonic|video)<\/strong>/i);
+  if (formatMatch) {
+    result.descHearingFormat = formatMatch[1].trim();
+  }
+
+  // Extract date from pattern: "on <strong>Date</strong>" - handles various date formats
+  const dateMatch = desc.match(/\bon\s*<strong>([A-Za-z]+\s+\d{1,2},?\s*\d{4}|[A-Za-z]+\s+\d{1,2}|[\d\/\-]+)<\/strong>/i);
+  if (dateMatch) {
+    result.descHearingDate = dateMatch[1].trim();
+  }
+
+  // Extract time from pattern: "at <strong>Time</strong>"
+  const timeMatch = desc.match(/\bat\s*<strong>(\d{1,2}:\d{2}\s*(?:AM|PM)?)<\/strong>/i);
+  if (timeMatch) {
+    result.descHearingTime = timeMatch[1].trim();
+  }
+
+  // Extract Judge from plain text or after JUDGE label
+  const judgeMatch = desc.match(/(?:JUDGE|Judge)[:\s]*<?\/?b?>?([A-Za-z][A-Za-z\s,.\-']+?)(?:<|COURT|ADDRESS|RIDER|\n|$)/i) ||
+                     desc.match(/<b>Judge[:\s]*<\/b>([^<\n]+)/i);
+  if (judgeMatch) {
+    result.descJudge = judgeMatch[1].trim().replace(/\s+/g, ' ');
+  }
+
+  // Extract Court Address
+  const addressMatch = desc.match(/COURT\s*ADDRESS[:\s]*<?\/?b?>?([^<\n]+)/i) ||
+                       desc.match(/<b>Court Address[:\s]*<\/b>([^<\n]+)/i);
+  if (addressMatch) {
+    result.descCourtAddress = addressMatch[1].trim();
+  }
+
+  // Extract Hearing Location
+  const locationMatch = desc.match(/(?:Hearing Location|Location)[:\s]*<?\/?b?>?([^<\n]+?)(?:<|\n|$)/i);
+  if (locationMatch) {
+    result.descHearingLocation = locationMatch[1].trim();
+  }
+
+  // Extract Alien Names from table or text patterns
+  const alienNames = [];
+  // Pattern 1: "Alien Name:</b><br><br>NAME" or similar
+  const alienNameMatches = desc.matchAll(/Alien Name[:\s]*<?\/?b?>?[:\s]*(?:<br[^>]*>)*([A-Z][A-Z\s,\-']+?)(?:<|,\s*[A-Z]#|\n|$)/gi);
+  for (const match of alienNameMatches) {
+    const name = match[1].trim();
+    if (name && name.length > 1 && !name.match(/^\d/)) {
+      alienNames.push(name);
+    }
+  }
+
+  // Pattern 2: Extract from table cells - names typically in <td> followed by A# patterns
+  const tableNameMatches = desc.matchAll(/<td[^>]*>([A-Za-z][A-Za-z\s,\-']+?)<\/td>/gi);
+  for (const match of tableNameMatches) {
+    const name = match[1].trim();
+    // Filter out non-name content (dates, numbers, short strings)
+    if (name && name.length > 3 &&
+        !name.match(/^\d/) &&
+        !name.match(/^[\d\-]+$/) &&
+        !alienNames.includes(name) &&
+        name.match(/[A-Za-z]{2,}/)) {
+      alienNames.push(name);
+    }
+  }
+  result.descAlienNames = alienNames.join('; ');
+
+  // Extract Phone Number
+  const phoneMatch = desc.match(/Phone(?:\s*Number)?[:\s]*<?\/?b?>?\s*\(?\d{3}\)?[\s\-.]?\d{3}[\s\-.]?\d{4}/i);
+  if (phoneMatch) {
+    const phoneNum = phoneMatch[0].replace(/Phone(?:\s*Number)?[:\s]*/i, '').trim();
+    result.descPhoneNumber = phoneNum;
+  }
+
+  return result;
+};
+
 // Map hearing type from Clio to Airtable (legacy function, see mapEventHearingType for full mapping)
 const mapHearingType = (clioType) => {
   const mapping = {
@@ -5313,6 +5439,7 @@ function ClioAirtableMerger() {
 
         const summaryParsed = parseEventSummary(summary);
         const descParsed = parseEventDescription(description);
+        const htmlParsed = parseHtmlDescription(description);
 
         // Skip events without A#
         if (!summaryParsed.aNumber) {
@@ -5436,6 +5563,17 @@ function ClioAirtableMerger() {
           '_parsedFirstName': parsedFirstName,
           '_parsedLastName': parsedLastName,
           '_normalizedANum': normalizedEventANum,
+          // Parsed HTML description fields (extracted from _rawDescription)
+          '_descHearingType': htmlParsed.descHearingType,
+          '_descHearingFormat': htmlParsed.descHearingFormat,
+          '_descHearingDate': htmlParsed.descHearingDate,
+          '_descHearingTime': htmlParsed.descHearingTime,
+          '_descJudge': htmlParsed.descJudge,
+          '_descCourtAddress': htmlParsed.descCourtAddress,
+          '_descHearingLocation': htmlParsed.descHearingLocation,
+          '_descAlienNames': htmlParsed.descAlienNames,
+          '_descPhoneNumber': htmlParsed.descPhoneNumber,
+          '_descPlainText': htmlParsed.descPlainText,
         });
       });
 
@@ -7700,7 +7838,7 @@ function ClioAirtableMerger() {
                       onClick={() => downloadCSV(
                         phase3Result.events,
                         'phase3_events.csv',
-                        ['Case Master Record ID', 'A#', 'Hearing Date/Time', 'Event Type', 'Event Hearing Type', 'Court', 'Judge', 'Notes', '_clientName', '_rawSummary', '_rawDescription', '_rawStartDateTime', '_rawEndDateTime', '_rawLocation', '_rawUid', '_rawNotes']
+                        ['Case Master Record ID', 'A#', 'Hearing Date/Time', 'Event Type', 'Event Hearing Type', 'Court', 'Judge', 'Notes', '_clientName', '_rawSummary', '_rawStartDateTime', '_rawEndDateTime', '_rawLocation', '_rawUid', '_rawNotes', '_descHearingType', '_descHearingFormat', '_descHearingDate', '_descHearingTime', '_descJudge', '_descCourtAddress', '_descHearingLocation', '_descAlienNames', '_descPhoneNumber', '_descPlainText']
                       )}
                     >
                       Download events.csv ({phase3Result.events.length})
@@ -7722,12 +7860,22 @@ function ClioAirtableMerger() {
                           'Client Name': e['_clientName'],
                           // Raw ICS fields (original values from ICS file)
                           'Raw Summary': e['_rawSummary'],
-                          'Raw Description': e['_rawDescription'],
                           'Raw Start DateTime': e['_rawStartDateTime'],
                           'Raw End DateTime': e['_rawEndDateTime'],
                           'Raw Location': e['_rawLocation'],
                           'Raw UID': e['_rawUid'],
                           'Raw Notes': e['_rawNotes'],
+                          // Parsed HTML description fields (extracted from description)
+                          'Desc Hearing Type': e['_descHearingType'],
+                          'Desc Hearing Format': e['_descHearingFormat'],
+                          'Desc Hearing Date': e['_descHearingDate'],
+                          'Desc Hearing Time': e['_descHearingTime'],
+                          'Desc Judge': e['_descJudge'],
+                          'Desc Court Address': e['_descCourtAddress'],
+                          'Desc Hearing Location': e['_descHearingLocation'],
+                          'Desc Alien Names': e['_descAlienNames'],
+                          'Desc Phone Number': e['_descPhoneNumber'],
+                          'Desc Plain Text': e['_descPlainText'],
                         })),
                         'phase3_events.json'
                       )}
