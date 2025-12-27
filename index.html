@@ -18,6 +18,7 @@ const { useState, useCallback, useEffect } = React;
 const ANDREW_BAHR_RECORD_ID = 'recRaQ8cur6na6kIw';
 const AIRTABLE_BASE_ID = 'app1tsUyKa7F3sy0D';
 const CASE_MASTER_VIEW_TABLE_ID = 'tblgynOzESGvAXAsK';
+const CLIENT_INFO_TABLE_ID = 'tbl0uHmtLkGyDnSP9';
 
 // Available input fields for mapping (from Clio data and computed fields)
 const AVAILABLE_INPUT_FIELDS = [
@@ -2207,6 +2208,202 @@ function ClioAirtableMerger() {
     }));
 
     addPhase3Log(`Relationships upload complete: ${created} created, ${failed} failed`, created > 0 ? 'success' : 'error');
+  };
+
+  // Create Clients and Case Masters for orphan events (fallback matching)
+  const createClientsAndCaseMasters = async () => {
+    if (!phase3Result?.events?.length) {
+      addPhase3Log('No events to process', 'warning');
+      return;
+    }
+
+    if (!airtableApiKey) {
+      addPhase3Log('Airtable API key required for creating records', 'error');
+      return;
+    }
+
+    // Get orphan events that need processing
+    const orphanEvents = phase3Result.events.filter(e => e._orphan);
+
+    if (orphanEvents.length === 0) {
+      addPhase3Log('No orphan events to process', 'info');
+      return;
+    }
+
+    // Separate events by type
+    const eventsWithFallbackClient = orphanEvents.filter(e => e._fallbackClientRecordId);
+    const eventsNeedingNewClient = orphanEvents.filter(e => e._needsNewClient);
+
+    addPhase3Log(`Processing ${orphanEvents.length} orphan events: ${eventsWithFallbackClient.length} have client (need Case Master), ${eventsNeedingNewClient.length} need new client`, 'info');
+
+    setPhase3SyncState(prev => ({
+      ...prev,
+      loading: true,
+      progress: { current: 0, total: orphanEvents.length, phase: 'Creating Records' }
+    }));
+
+    let clientsCreated = 0;
+    let caseMastersCreated = 0;
+    let eventsUpdated = 0;
+    let failed = 0;
+
+    // Track created records to avoid duplicates (by A#)
+    const createdClientsByANum = new Map(); // A# -> record ID
+    const createdCaseMastersByANum = new Map(); // A# -> record ID
+
+    // Helper: Create a single Client record
+    const createClient = async (event) => {
+      const aNum = event['A#'];
+      const normalizedANum = event._normalizedANum;
+
+      // Check if we already created this client
+      if (createdClientsByANum.has(normalizedANum)) {
+        return createdClientsByANum.get(normalizedANum);
+      }
+
+      const fields = {
+        'A#': aNum,
+        'First Name': event._parsedFirstName || '',
+        'Family Name': event._parsedLastName || '',
+        'Bahr Client': true,
+      };
+
+      try {
+        const response = await fetch(
+          `https://api.airtable.com/v0/${AIRTABLE_BASE_ID}/${CLIENT_INFO_TABLE_ID}`,
+          {
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${airtableApiKey}`,
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ fields })
+          }
+        );
+
+        if (!response.ok) {
+          const errData = await response.json().catch(() => ({}));
+          throw new Error(errData.error?.message || `HTTP ${response.status}`);
+        }
+
+        const result = await response.json();
+        const recordId = result.id;
+        createdClientsByANum.set(normalizedANum, recordId);
+        addPhase3Log(`Created Client: ${event._parsedFirstName} ${event._parsedLastName} (A#: ${aNum})`, 'success');
+        return recordId;
+      } catch (err) {
+        addPhase3Log(`Failed to create Client for A# ${aNum}: ${err.message}`, 'error');
+        return null;
+      }
+    };
+
+    // Helper: Create a single Case Master record
+    const createCaseMaster = async (clientRecordId, event) => {
+      const normalizedANum = event._normalizedANum;
+
+      // Check if we already created a case master for this A#
+      if (createdCaseMastersByANum.has(normalizedANum)) {
+        return createdCaseMastersByANum.get(normalizedANum);
+      }
+
+      const fields = {
+        'Client': [clientRecordId], // Link to Client Info
+        'Description': event._eventDesc || `${event._parsedLastName}, ${event._parsedFirstName}`.trim(),
+        'Bahr Client': true,
+      };
+
+      try {
+        const response = await fetch(
+          `https://api.airtable.com/v0/${AIRTABLE_BASE_ID}/${CASE_MASTER_VIEW_TABLE_ID}`,
+          {
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${airtableApiKey}`,
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ fields })
+          }
+        );
+
+        if (!response.ok) {
+          const errData = await response.json().catch(() => ({}));
+          throw new Error(errData.error?.message || `HTTP ${response.status}`);
+        }
+
+        const result = await response.json();
+        const recordId = result.id;
+        createdCaseMastersByANum.set(normalizedANum, recordId);
+        addPhase3Log(`Created Case Master for A#: ${event['A#']}`, 'success');
+        return recordId;
+      } catch (err) {
+        addPhase3Log(`Failed to create Case Master for A# ${event['A#']}: ${err.message}`, 'error');
+        return null;
+      }
+    };
+
+    // Process events one by one to handle dependencies
+    let processed = 0;
+
+    for (const event of orphanEvents) {
+      processed++;
+      setPhase3SyncState(prev => ({
+        ...prev,
+        progress: { ...prev.progress, current: processed, phase: 'Creating Records' }
+      }));
+
+      let clientRecordId = null;
+      let caseMasterRecordId = null;
+
+      // Check if this event has a fallback client match
+      if (event._fallbackClientRecordId) {
+        clientRecordId = event._fallbackClientRecordId;
+      } else if (event._needsNewClient) {
+        // Create new client
+        clientRecordId = await createClient(event);
+        if (clientRecordId) {
+          clientsCreated++;
+        } else {
+          failed++;
+          continue;
+        }
+      }
+
+      if (!clientRecordId) {
+        addPhase3Log(`No client for event: ${event._summary}`, 'warning');
+        failed++;
+        continue;
+      }
+
+      // Create Case Master linked to client
+      caseMasterRecordId = await createCaseMaster(clientRecordId, event);
+      if (caseMasterRecordId) {
+        caseMastersCreated++;
+        // Update the event in phase3Result with the new Case Master link
+        event['Case Master'] = [caseMasterRecordId];
+        event._orphan = false;
+        eventsUpdated++;
+      } else {
+        failed++;
+      }
+
+      // Rate limiting
+      await new Promise(resolve => setTimeout(resolve, 250));
+    }
+
+    // Update phase3Result state with modified events
+    setPhase3Result(prev => ({
+      ...prev,
+      events: [...prev.events]
+    }));
+
+    setPhase3SyncState(prev => ({
+      ...prev,
+      loading: false,
+      progress: { current: orphanEvents.length, total: orphanEvents.length, phase: 'Records Created' }
+    }));
+
+    addPhase3Log(`Fallback processing complete: ${clientsCreated} clients created, ${caseMastersCreated} case masters created, ${eventsUpdated} events linked, ${failed} failed`,
+      eventsUpdated > 0 ? 'success' : 'warning');
   };
 
   // Fetch Airtable bases
@@ -4887,6 +5084,10 @@ function ClioAirtableMerger() {
     const clientRecordIdToInfo = new Map();
     const clioContactToClientInfo = new Map();
 
+    // Fallback lookup maps for orphan matching
+    const clientANumberToInfo = new Map(); // A# -> client info (for fallback matching)
+    const clientNameToInfo = new Map(); // "LASTNAME, FIRSTNAME" -> client info (for fallback matching)
+
     if (phase3Data.airtableClients?.rows) {
       phase3Data.airtableClients.rows.forEach((row) => {
         const recordId = row['Record ID'] || row['recordId'] || '';
@@ -4915,8 +5116,22 @@ function ClioAirtableMerger() {
           clioContactToRecordId.set(clioContactId, recordId);
           clioContactToClientInfo.set(clioContactId, clientInfo);
         }
+
+        // Build A# -> Client lookup for fallback matching
+        if (clientInfo.aNumber && recordId) {
+          const normalizedANum = clientInfo.aNumber.replace(/[^0-9]/g, '');
+          if (normalizedANum.length === 9) {
+            clientANumberToInfo.set(normalizedANum, clientInfo);
+          }
+        }
+
+        // Build Name -> Client lookup for fallback matching (format: "LASTNAME, FIRSTNAME")
+        if (clientInfo.lastName && clientInfo.firstName && recordId) {
+          const normalizedName = `${clientInfo.lastName.toUpperCase()}, ${clientInfo.firstName.toUpperCase()}`;
+          clientNameToInfo.set(normalizedName, clientInfo);
+        }
       });
-      reports.push({ type: 'info', message: `Loaded ${clioContactToRecordId.size} client mappings` });
+      reports.push({ type: 'info', message: `Loaded ${clioContactToRecordId.size} client mappings (${clientANumberToInfo.size} by A#, ${clientNameToInfo.size} by name)` });
     }
 
     // Store all Case Masters for each A# (one A# can have multiple matters)
@@ -4985,6 +5200,9 @@ function ClioAirtableMerger() {
     const eventsOutput = [];
     let eventsLinked = 0;
     let eventsUnlinked = 0;
+    let eventsFallbackANum = 0;
+    let eventsFallbackName = 0;
+    let eventsNeedNewClient = 0;
 
     if (phase3Data.clioEvents?.rows) {
       phase3Data.clioEvents.rows.forEach((row) => {
@@ -5005,6 +5223,8 @@ function ClioAirtableMerger() {
         // Try to find Case Master View by A# - use highest matterId for most recent case
         let caseMasterRecordId = '';
         let matchedCaseMaster = null;
+        let fallbackMatchType = null; // 'aNumber', 'name', or null
+        let fallbackClient = null; // Client info if matched via fallback
 
         const normalizedEventANum = summaryParsed.aNumber.replace(/[^0-9]/g, '');
         const caseMasters = aNumberToCaseMasters.get(normalizedEventANum) || [];
@@ -5024,6 +5244,40 @@ function ClioAirtableMerger() {
           });
         }
 
+        // FALLBACK MATCHING: If no Case Master found, try to find client in Client Info
+        if (!caseMasterRecordId) {
+          // Fallback 1: Try to find client by A# in Client Info
+          const clientByANum = clientANumberToInfo.get(normalizedEventANum);
+          if (clientByANum) {
+            fallbackMatchType = 'aNumber';
+            fallbackClient = clientByANum;
+            eventsFallbackANum++;
+            reports.push({
+              type: 'info',
+              message: `Fallback A# match: ${summaryParsed.aNumber} → Client "${clientByANum.firstName} ${clientByANum.lastName}" (needs Case Master)`
+            });
+          } else if (summaryParsed.clientName) {
+            // Fallback 2: Try to find client by name in Client Info
+            // Event format: "ICH OKAFOR, CHRISTOPHER" → clientName = "OKAFOR, CHRISTOPHER"
+            const normalizedEventName = summaryParsed.clientName.toUpperCase().trim();
+            const clientByName = clientNameToInfo.get(normalizedEventName);
+            if (clientByName) {
+              fallbackMatchType = 'name';
+              fallbackClient = clientByName;
+              eventsFallbackName++;
+              reports.push({
+                type: 'info',
+                message: `Fallback name match: "${normalizedEventName}" → Client "${clientByName.firstName} ${clientByName.lastName}" (needs Case Master)`
+              });
+            }
+          }
+
+          // If still no match, we need to create a new client
+          if (!fallbackClient) {
+            eventsNeedNewClient++;
+          }
+        }
+
         if (caseMasterRecordId) {
           eventsLinked++;
         } else {
@@ -5032,6 +5286,22 @@ function ClioAirtableMerger() {
 
         const court = location || descParsed.courtAddress || '';
         const isOrphan = !caseMasterRecordId;
+
+        // Extract description text before first "|" for Case Master description
+        const eventDesc = summary.split('|')[0].trim();
+
+        // Parse client name for new client creation (format: "LASTNAME, FIRSTNAME")
+        let parsedFirstName = '';
+        let parsedLastName = '';
+        if (summaryParsed.clientName) {
+          const nameParts = summaryParsed.clientName.split(',').map(s => s.trim());
+          if (nameParts.length >= 2) {
+            parsedLastName = nameParts[0];
+            parsedFirstName = nameParts.slice(1).join(' ');
+          } else {
+            parsedLastName = summaryParsed.clientName;
+          }
+        }
 
         eventsOutput.push({
           'Case Master': caseMasterRecordId ? [caseMasterRecordId] : [], // Link to Case Master View (must be array)
@@ -5047,10 +5317,21 @@ function ClioAirtableMerger() {
           '_clientName': summaryParsed.clientName || '',
           '_orphan': isOrphan,
           '_matchedPpId': matchedCaseMaster?.ppId || '',
+          // Fallback matching info
+          '_fallbackMatchType': fallbackMatchType,
+          '_fallbackClientRecordId': fallbackClient?.recordId || '',
+          '_fallbackClientName': fallbackClient ? `${fallbackClient.firstName} ${fallbackClient.lastName}` : '',
+          '_needsNewClient': !caseMasterRecordId && !fallbackClient,
+          '_eventDesc': eventDesc, // For Case Master description
+          '_parsedFirstName': parsedFirstName,
+          '_parsedLastName': parsedLastName,
+          '_normalizedANum': normalizedEventANum,
         });
       });
 
-      reports.push({ type: 'info', message: `Processed ${eventsOutput.length} events (${eventsLinked} matched, ${eventsUnlinked} orphans)` });
+      const fallbackTotal = eventsFallbackANum + eventsFallbackName;
+      const trueOrphans = eventsUnlinked - fallbackTotal;
+      reports.push({ type: 'info', message: `Processed ${eventsOutput.length} events: ${eventsLinked} matched, ${fallbackTotal} fallback (${eventsFallbackANum} by A#, ${eventsFallbackName} by name), ${eventsNeedNewClient} need new client` });
     }
 
     // Process Relationships
@@ -7330,20 +7611,59 @@ function ClioAirtableMerger() {
                   {phase3Result.events.length > 0 && (
                     <div style={{ marginBottom: '1.5rem' }}>
                       {/* Event Analysis Summary */}
-                      <div style={{ display: 'flex', gap: '1rem', marginBottom: '1rem' }}>
-                        <div style={{ background: '#1e293b', padding: '0.75rem 1rem', borderRadius: '6px', flex: 1 }}>
+                      <div style={{ display: 'flex', gap: '0.75rem', marginBottom: '1rem', flexWrap: 'wrap' }}>
+                        <div style={{ background: '#1e293b', padding: '0.75rem 1rem', borderRadius: '6px', flex: '1 1 120px' }}>
                           <div style={{ fontSize: '1.25rem', fontWeight: 'bold', color: '#10b981' }}>
                             {phase3Result.events.filter(e => !e._orphan).length}
                           </div>
-                          <div style={{ fontSize: '0.7rem', color: '#94a3b8' }}>Matched (have A# in Case Master)</div>
+                          <div style={{ fontSize: '0.7rem', color: '#94a3b8' }}>Matched (Case Master)</div>
                         </div>
-                        <div style={{ background: '#1e293b', padding: '0.75rem 1rem', borderRadius: '6px', flex: 1 }}>
-                          <div style={{ fontSize: '1.25rem', fontWeight: 'bold', color: '#f59e0b' }}>
-                            {phase3Result.events.filter(e => e._orphan).length}
+                        <div style={{ background: '#1e293b', padding: '0.75rem 1rem', borderRadius: '6px', flex: '1 1 120px' }}>
+                          <div style={{ fontSize: '1.25rem', fontWeight: 'bold', color: '#6366f1' }}>
+                            {phase3Result.events.filter(e => e._orphan && e._fallbackClientRecordId).length}
                           </div>
-                          <div style={{ fontSize: '0.7rem', color: '#94a3b8' }}>Orphans (A# not in Case Master)</div>
+                          <div style={{ fontSize: '0.7rem', color: '#94a3b8' }}>Client Found (need Case Master)</div>
+                        </div>
+                        <div style={{ background: '#1e293b', padding: '0.75rem 1rem', borderRadius: '6px', flex: '1 1 120px' }}>
+                          <div style={{ fontSize: '1.25rem', fontWeight: 'bold', color: '#f59e0b' }}>
+                            {phase3Result.events.filter(e => e._orphan && e._needsNewClient).length}
+                          </div>
+                          <div style={{ fontSize: '0.7rem', color: '#94a3b8' }}>Need New Client</div>
                         </div>
                       </div>
+
+                      {/* Fallback Processing Button */}
+                      {phase3Result.events.filter(e => e._orphan).length > 0 && (
+                        <div style={{ marginBottom: '1rem', padding: '1rem', background: 'rgba(99, 102, 241, 0.1)', borderRadius: '8px', border: '1px solid rgba(99, 102, 241, 0.3)' }}>
+                          <h4 style={{ color: '#818cf8', marginBottom: '0.5rem', fontSize: '0.9rem' }}>Fallback Matching</h4>
+                          <p style={{ fontSize: '0.75rem', color: '#94a3b8', marginBottom: '0.75rem' }}>
+                            Create missing Client and Case Master records for orphan events. This will:
+                            <br/>• For events with matching client (by A# or name): Create a new Case Master
+                            <br/>• For events with no client: Create both Client and Case Master records
+                          </p>
+                          <button
+                            onClick={createClientsAndCaseMasters}
+                            disabled={phase3SyncState.loading || !airtableApiKey}
+                            style={{
+                              padding: '0.5rem 1rem',
+                              background: phase3SyncState.loading || !airtableApiKey ? '#374151' : '#6366f1',
+                              color: 'white',
+                              border: 'none',
+                              borderRadius: '6px',
+                              cursor: phase3SyncState.loading || !airtableApiKey ? 'not-allowed' : 'pointer',
+                              fontSize: '0.8rem',
+                              opacity: phase3SyncState.loading || !airtableApiKey ? 0.6 : 1
+                            }}
+                          >
+                            Create Records for Orphans ({phase3Result.events.filter(e => e._orphan).length})
+                          </button>
+                          {!airtableApiKey && (
+                            <span style={{ marginLeft: '0.75rem', fontSize: '0.75rem', color: '#f59e0b' }}>
+                              API key required
+                            </span>
+                          )}
+                        </div>
+                      )}
 
                       <h4 style={{ marginBottom: '0.5rem' }}>Matched Events Preview</h4>
                       <div className="table-container" style={{ marginBottom: '1rem' }}>
@@ -7373,7 +7693,7 @@ function ClioAirtableMerger() {
 
                       {phase3Result.events.filter(e => e._orphan).length > 0 && (
                         <>
-                          <h4 style={{ marginBottom: '0.5rem', color: '#f59e0b' }}>Orphan Events (no matching A#)</h4>
+                          <h4 style={{ marginBottom: '0.5rem', color: '#f59e0b' }}>Orphan Events (need processing)</h4>
                           <div className="table-container">
                             <table>
                               <thead>
@@ -7381,16 +7701,25 @@ function ClioAirtableMerger() {
                                   <th>Client Name</th>
                                   <th>A#</th>
                                   <th>Date/Time</th>
-                                  <th>Type</th>
+                                  <th>Fallback Match</th>
+                                  <th>Action Needed</th>
                                 </tr>
                               </thead>
                               <tbody>
                                 {phase3Result.events.filter(e => e._orphan).slice(0, 10).map((row, i) => (
-                                  <tr key={i} style={{ background: 'rgba(245, 158, 11, 0.1)' }}>
+                                  <tr key={i} style={{ background: row._fallbackClientRecordId ? 'rgba(99, 102, 241, 0.1)' : 'rgba(245, 158, 11, 0.1)' }}>
                                     <td>{row['_clientName'] || '—'}</td>
-                                    <td style={{ color: '#f59e0b' }}>{row['A#']}</td>
+                                    <td style={{ color: row._fallbackClientRecordId ? '#818cf8' : '#f59e0b' }}>{row['A#']}</td>
                                     <td>{row['Hearing Date/Time']?.slice(0, 16)}</td>
-                                    <td>{row['Event Hearing Type']}</td>
+                                    <td style={{ fontSize: '0.75rem' }}>
+                                      {row._fallbackMatchType === 'aNumber' && <span style={{ color: '#10b981' }}>A# → {row._fallbackClientName}</span>}
+                                      {row._fallbackMatchType === 'name' && <span style={{ color: '#6366f1' }}>Name → {row._fallbackClientName}</span>}
+                                      {!row._fallbackMatchType && <span style={{ color: '#f59e0b' }}>No match</span>}
+                                    </td>
+                                    <td style={{ fontSize: '0.75rem' }}>
+                                      {row._fallbackClientRecordId && <span style={{ color: '#6366f1' }}>Create Case Master</span>}
+                                      {row._needsNewClient && <span style={{ color: '#f59e0b' }}>Create Client + Case Master</span>}
+                                    </td>
                                   </tr>
                                 ))}
                               </tbody>
