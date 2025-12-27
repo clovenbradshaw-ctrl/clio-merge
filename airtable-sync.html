@@ -200,11 +200,10 @@ const AIRTABLE_CONFIG = {
     },
     caseMaster: {
       name: 'Case Master View',
-      uniqueFields: ['clio_matter_id', 'PP ID'],
+      uniqueFields: ['clio_matter_id'],
       fields: {
         'Edit Client Info': { type: 'link', required: true },
         'clio_matter_id': { type: 'text', required: false },
-        'PP ID': { type: 'text', required: false, computed: true }, // Computed field - ignored during upload
         'Description': { type: 'text', required: false },
         'File Case Status': { type: 'select', required: false },
         'Case Notes': { type: 'longtext', required: false },
