@@ -870,7 +870,9 @@ const parseEventSummary = (summary) => {
   //           "ICH OKAFOR, CHRISTOPHER A-Number: 221-096-935"
   //           "**TORG** IMH LOPEZ JIRON, DAMARIS ESTHER | A-Number: 244-445-909"
   //           "CLAUDIA | A-Number: 220-971-739    03/02/2026 08:30 AM EST" (ICS format)
-  const clientNameMatch = working.match(/(?:MASTER|MCH|INDIVIDUAL|ICH|IMH|BOND|STATUS|CUSTODY|CALENDAR)\s+([A-Z][A-Za-z\s-]+(?:,\s*[A-Za-z\s-]+)?)\s*(?:\||A-?Number)/i);
+  // Hearing type keywords for client name extraction
+  const hearingTypeKeywords = 'MASTER|MCH|INDIVIDUAL|ICH|IMH|BOND|STATUS|CUSTODY|CALENDAR|PRE-HEARING|PREHEARING|ASYLUM|USCIS|CONTESTED|APPEAL|BRIEF|E-33|E33|ICE|CFI|RFI';
+  const clientNameMatch = working.match(new RegExp(`(?:${hearingTypeKeywords})\\s+([A-Z][A-Za-z\\s-]+(?:,\\s*[A-Za-z\\s-]+)?)\\s*(?:\\||A-?Number)`, 'i'));
   if (clientNameMatch) {
     result.clientName = clientNameMatch[1].trim().replace(/\s*\|\s*$/, '').trim();
   } else {
@@ -895,8 +897,28 @@ const parseEventSummary = (summary) => {
     working = working.replace(matterMatch[0], '').trim();
   }
 
-  // Extract hearing type
-  const HEARING_TYPES = ['MASTER', 'MCH', 'INDIVIDUAL', 'ICH', 'IMH', 'BOND', 'STATUS', 'CUSTODY', 'CALENDAR'];
+  // Extract hearing type - order matters (more specific first)
+  // Matches ICS summary types and maps to Airtable Event Hearing Types
+  const HEARING_TYPES = [
+    // Specific multi-word patterns first
+    'PENDING ICH DECISION', 'PENDING ICH DATE', 'ICH DECISION',
+    'STATUS CONFERENCE', 'STATUS DOCKET',
+    'PRE-HEARING CONF', 'PRE-HEARING', 'PREHEARING',
+    'CALL UP DATE', 'CALL UP', 'CALLUP',
+    'ASYLUM INTERVIEW', 'USCIS INTERVIEW',
+    'APPEAL NOTICE', 'BRIEF DUE',
+    'FILE DATE SCHEDULING', 'SCHEDULING ORDER',
+    'CALENDAR CONTROL', 'CONTESTED HEARING',
+    'E-33 DOCKET', 'E-33', 'E33',
+    'ICE APPT', 'ICE APPOINTMENT',
+    'CFI/RFI', 'CFI', 'RFI',
+    'TEST EVENT',
+    // Single-word patterns last
+    'INDIVIDUAL', 'ICH', 'IMH',  // Individual types
+    'MASTER', 'MCH',             // Master types
+    'BOND', 'STATUS', 'CUSTODY', 'CALENDAR',
+    'ASYLUM', 'USCIS', 'CONTESTED', 'APPEAL', 'BRIEF', 'ICE'
+  ];
   for (const typeKw of HEARING_TYPES) {
     if (working.toUpperCase().includes(typeKw)) {
       result.hearingType = typeKw;
@@ -926,15 +948,43 @@ const parseEventDescription = (desc) => {
   return result;
 };
 
-// Map hearing type from Clio to Airtable
+// Map hearing type from Clio to Airtable (legacy function, see mapEventHearingType for full mapping)
 const mapHearingType = (clioType) => {
   const mapping = {
     'MASTER': 'Master',
+    'MCH': 'Master',
     'INDIVIDUAL': 'Individual',
     'ICH': 'Individual',
-    'MCH': 'Master',
+    'IMH': 'Individual',
     'BOND': 'Bond',
     'STATUS': 'Status Docket',
+    'STATUS DOCKET': 'Status Docket',
+    'STATUS CONFERENCE': 'Status Conference',
+    'CUSTODY': 'Custody',
+    'CALENDAR': 'Calendar Control',
+    'CALENDAR CONTROL': 'Calendar Control',
+    'PRE-HEARING': 'Pre-Hearing Conf',
+    'PRE-HEARING CONF': 'Pre-Hearing Conf',
+    'ASYLUM': 'Asylum Interview',
+    'ASYLUM INTERVIEW': 'Asylum Interview',
+    'USCIS': 'USCIS Interview',
+    'USCIS INTERVIEW': 'USCIS Interview',
+    'CALL UP': 'Call up Date',
+    'CONTESTED': 'Contested Hearing',
+    'APPEAL': 'Appeal Notice Due',
+    'BRIEF': 'Brief Due',
+    'E-33': 'E-33 Docket',
+    'E-33 DOCKET': 'E-33 Docket',
+    'ICE': 'ICE Appt',
+    'ICE APPT': 'ICE Appt',
+    'CFI': 'CFI/RFI',
+    'RFI': 'CFI/RFI',
+    'CFI/RFI': 'CFI/RFI',
+    'TEST EVENT': 'Test Event',
+    'PENDING ICH DECISION': 'Pending ICH Decision',
+    'PENDING ICH DATE': 'Pending ICH Date',
+    'ICH DECISION': 'ICH Decision',
+    'FILE DATE SCHEDULING ORDER': 'File Date Scheduling Order',
   };
   return mapping[clioType?.toUpperCase()] || clioType;
 };
@@ -1961,31 +2011,78 @@ function ClioAirtableMerger() {
   };
 
   // Map Event Hearing Type from Clio to Airtable options
+  // Airtable Event Types: Pending ICH Decision, Master, Individual, Pre-Hearing Conf,
+  // Call up Date, Asylum Interview, USCIS Interview, Status Docket, Appeal Notice Due,
+  // Brief Due, File Date Scheduling Order, Custody, Calendar Control, Contested Hearing,
+  // E-33 Docket, Pending ICH Date, Status Conference, ICH Decision, Bond, Test Event,
+  // ICE Appt, CFI/RFI
   const mapEventHearingType = (clioType) => {
     if (!clioType) return null;
     const normalized = clioType.toUpperCase();
 
-    const typeMap = {
-      'MASTER': 'Master',
-      'MCH': 'Master',
-      'INDIVIDUAL': 'Individual',
-      'ICH': 'Individual',
-      'BOND': 'Bond',
-      'STATUS': 'Status Docket',
+    // Exact matches first (more specific patterns)
+    const exactTypeMap = {
+      'PENDING ICH DECISION': 'Pending ICH Decision',
+      'PENDING ICH DATE': 'Pending ICH Date',
+      'ICH DECISION': 'ICH Decision',
+      'STATUS CONFERENCE': 'Status Conference',
       'STATUS DOCKET': 'Status Docket',
+      'PRE-HEARING CONF': 'Pre-Hearing Conf',
+      'PRE-HEARING CONFERENCE': 'Pre-Hearing Conf',
+      'PREHEARING CONF': 'Pre-Hearing Conf',
+      'CALL UP DATE': 'Call up Date',
+      'CALLUP DATE': 'Call up Date',
+      'ASYLUM INTERVIEW': 'Asylum Interview',
+      'USCIS INTERVIEW': 'USCIS Interview',
+      'APPEAL NOTICE DUE': 'Appeal Notice Due',
+      'BRIEF DUE': 'Brief Due',
+      'FILE DATE SCHEDULING ORDER': 'File Date Scheduling Order',
+      'CALENDAR CONTROL': 'Calendar Control',
+      'CONTESTED HEARING': 'Contested Hearing',
+      'E-33 DOCKET': 'E-33 Docket',
+      'E33 DOCKET': 'E-33 Docket',
+      'ICE APPT': 'ICE Appt',
+      'ICE APPOINTMENT': 'ICE Appt',
+      'CFI/RFI': 'CFI/RFI',
+      'CFI RFI': 'CFI/RFI',
+      'TEST EVENT': 'Test Event',
+    };
+
+    // Check exact matches first
+    for (const [key, value] of Object.entries(exactTypeMap)) {
+      if (normalized === key || normalized.includes(key)) {
+        return value;
+      }
+    }
+
+    // Partial matches (less specific, check order matters)
+    const partialTypeMap = {
+      'INDIVIDUAL': 'Individual',
+      'ICH': 'Individual',  // Individual Calendar Hearing
+      'IMH': 'Individual',  // Individual Merits Hearing
+      'MASTER': 'Master',
+      'MCH': 'Master',      // Master Calendar Hearing
+      'BOND': 'Bond',
       'CUSTODY': 'Custody',
       'CALENDAR': 'Calendar Control',
+      'STATUS': 'Status Docket',
       'PRE-HEARING': 'Pre-Hearing Conf',
       'PREHEARING': 'Pre-Hearing Conf',
-      'ASYLUM INTERVIEW': 'Asylum Interview',
+      'ASYLUM': 'Asylum Interview',
       'USCIS': 'USCIS Interview',
       'CALL UP': 'Call up Date',
+      'CALLUP': 'Call up Date',
       'CONTESTED': 'Contested Hearing',
       'APPEAL': 'Appeal Notice Due',
       'BRIEF': 'Brief Due',
+      'E-33': 'E-33 Docket',
+      'E33': 'E-33 Docket',
+      'ICE': 'ICE Appt',
+      'CFI': 'CFI/RFI',
+      'RFI': 'CFI/RFI',
     };
 
-    for (const [key, value] of Object.entries(typeMap)) {
+    for (const [key, value] of Object.entries(partialTypeMap)) {
       if (normalized.includes(key)) {
         return value;
       }
