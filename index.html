@@ -561,6 +561,110 @@ const parseCSV = (text) => {
   return { headers, rows: dataRows };
 };
 
+// Parse ICS calendar file
+const parseICS = (text) => {
+  if (!text || !text.trim()) return { headers: [], rows: [] };
+
+  const events = [];
+  const lines = text.split(/\r?\n/);
+
+  let currentEvent = null;
+  let currentKey = null;
+  let currentValue = '';
+
+  for (let i = 0; i < lines.length; i++) {
+    let line = lines[i];
+
+    // Handle line continuations (lines starting with space or tab)
+    if ((line.startsWith(' ') || line.startsWith('\t')) && currentKey) {
+      currentValue += line.slice(1);
+      continue;
+    }
+
+    // Save previous key-value if exists
+    if (currentKey && currentEvent) {
+      currentEvent[currentKey] = currentValue;
+    }
+
+    // Check for new key-value pair
+    const colonIdx = line.indexOf(':');
+    if (colonIdx > 0) {
+      currentKey = line.slice(0, colonIdx);
+      currentValue = line.slice(colonIdx + 1);
+
+      // Handle property parameters (like DTSTART;TZID=America/New_York:20260302T083000)
+      const semicolonIdx = currentKey.indexOf(';');
+      if (semicolonIdx > 0) {
+        currentKey = currentKey.slice(0, semicolonIdx);
+      }
+    }
+
+    if (line === 'BEGIN:VEVENT') {
+      currentEvent = {};
+      currentKey = null;
+      currentValue = '';
+    } else if (line === 'END:VEVENT' && currentEvent) {
+      // Save last key-value
+      if (currentKey) {
+        currentEvent[currentKey] = currentValue;
+      }
+      events.push(currentEvent);
+      currentEvent = null;
+      currentKey = null;
+      currentValue = '';
+    }
+  }
+
+  // Convert ICS events to CSV-like row format for compatibility
+  const rows = events.map(event => {
+    // Parse ICS date format (YYYYMMDDTHHMMSS or YYYYMMDD)
+    const parseICSDate = (dateStr) => {
+      if (!dateStr) return '';
+      // Remove timezone suffix if present
+      const cleanDate = dateStr.replace(/Z$/, '');
+      if (cleanDate.length >= 15) {
+        // Format: YYYYMMDDTHHMMSS
+        const year = cleanDate.slice(0, 4);
+        const month = cleanDate.slice(4, 6);
+        const day = cleanDate.slice(6, 8);
+        const hour = cleanDate.slice(9, 11);
+        const minute = cleanDate.slice(11, 13);
+        const second = cleanDate.slice(13, 15);
+        return `${year}-${month}-${day}T${hour}:${minute}:${second}`;
+      } else if (cleanDate.length >= 8) {
+        // Format: YYYYMMDD (all-day event)
+        const year = cleanDate.slice(0, 4);
+        const month = cleanDate.slice(4, 6);
+        const day = cleanDate.slice(6, 8);
+        return `${year}-${month}-${day}`;
+      }
+      return dateStr;
+    };
+
+    // Decode ICS escaped characters
+    const decodeICS = (str) => {
+      if (!str) return '';
+      return str
+        .replace(/\\n/g, '\n')
+        .replace(/\\,/g, ',')
+        .replace(/\\;/g, ';')
+        .replace(/\\\\/g, '\\');
+    };
+
+    return {
+      'summary': decodeICS(event.SUMMARY || ''),
+      'description': decodeICS(event.DESCRIPTION || ''),
+      'start.dateTime': parseICSDate(event.DTSTART || ''),
+      'end.dateTime': parseICSDate(event.DTEND || ''),
+      'location': decodeICS(event.LOCATION || ''),
+      'uid': event.UID || '',
+    };
+  });
+
+  const headers = ['summary', 'description', 'start.dateTime', 'end.dateTime', 'location', 'uid'];
+  return { headers, rows };
+};
+
 // Normalize A# to ###-###-### format
 const normalizeANumber = (aNum) => {
   if (!aNum || !aNum.trim()) {
@@ -717,19 +821,30 @@ const normalizeDate = (value) => {
 };
 
 // Extract A# from text
+// Handles formats like: "CLAUDIA | A-Number: 220-971-739    03/02/2026 08:30 AM EST"
 const extractANumber = (text) => {
   if (!text) return null;
 
+  // Normalize whitespace (including non-breaking spaces)
+  const normalized = text.replace(/[\u00A0\u2007\u202F]/g, ' ');
+
   const patterns = [
-    /\|A-?(\d{3})-?(\d{3})-?(\d{3})/i,
-    /A-Number:?\s*(\d{3})-?(\d{3})-?(\d{3})/i,
-    /A#\s*:?\s*(\d{3})-?(\d{3})-?(\d{3})/i,
-    /\bA-(\d{3})-?(\d{3})-?(\d{3})\b/i,
-    /\b(\d{3})-?(\d{3})-?(\d{3})\b/,
+    // "| A-Number: ###-###-###" or "|A-Number: ###-###-###" (pipe before A-Number)
+    /\|\s*A-?Number:?\s*(\d{3})[\s-]*(\d{3})[\s-]*(\d{3})/i,
+    // "A-Number: ###-###-###" with flexible spacing/dashes
+    /A-?Number:?\s*(\d{3})[\s-]*(\d{3})[\s-]*(\d{3})/i,
+    // "A# ###-###-###" or "A#: ###-###-###"
+    /A#\s*:?\s*(\d{3})[\s-]*(\d{3})[\s-]*(\d{3})/i,
+    // "|A-###-###-###" (pipe directly before A-Number without "Number" word)
+    /\|\s*A[\s-]*(\d{3})[\s-]*(\d{3})[\s-]*(\d{3})/i,
+    // "A-###-###-###" standalone
+    /\bA[\s-]+(\d{3})[\s-]*(\d{3})[\s-]*(\d{3})\b/i,
+    // Just 9 digits in ###-###-### format (last resort)
+    /\b(\d{3})[\s-]+(\d{3})[\s-]+(\d{3})\b/,
   ];
 
   for (const pattern of patterns) {
-    const match = text.match(pattern);
+    const match = normalized.match(pattern);
     if (match) {
       const digits = match.slice(1).join('').replace(/\D/g, '');
       if (digits.length === 9) {
@@ -753,9 +868,16 @@ const parseEventSummary = (summary) => {
   // Patterns: "INDIVIDUAL TORRICO PEREZ DEL CERRO, CLAUDIA | A-Number: 220-971-739"
   //           "ICH OKAFOR, CHRISTOPHER A-Number: 221-096-935"
   //           "**TORG** IMH LOPEZ JIRON, DAMARIS ESTHER | A-Number: 244-445-909"
+  //           "CLAUDIA | A-Number: 220-971-739    03/02/2026 08:30 AM EST" (ICS format)
   const clientNameMatch = working.match(/(?:MASTER|MCH|INDIVIDUAL|ICH|IMH|BOND|STATUS|CUSTODY|CALENDAR)\s+([A-Z][A-Za-z\s-]+(?:,\s*[A-Za-z\s-]+)?)\s*(?:\||A-?Number)/i);
   if (clientNameMatch) {
     result.clientName = clientNameMatch[1].trim().replace(/\s*\|\s*$/, '').trim();
+  } else {
+    // Fallback: Try to extract name before pipe separator (ICS format: "CLIENTNAME | A-Number: ...")
+    const pipeNameMatch = working.match(/^([A-Z][A-Za-z\s,'-]+?)\s*\|\s*A-?Number/i);
+    if (pipeNameMatch) {
+      result.clientName = pipeNameMatch[1].trim();
+    }
   }
 
   working = working
@@ -2343,7 +2465,11 @@ function ClioAirtableMerger() {
     const reader = new FileReader();
     reader.onload = (e) => {
       const text = e.target.result;
-      const parsed = parseCSV(text);
+
+      // Use ICS parser for calendar files (.ics or files starting with BEGIN:VCALENDAR)
+      const isICS = file.name.toLowerCase().endsWith('.ics') ||
+                    text.trim().startsWith('BEGIN:VCALENDAR');
+      const parsed = (type === 'clioEvents' && isICS) ? parseICS(text) : parseCSV(text);
 
       if (phase === 1) {
         setPhase1Files(prev => ({ ...prev, [type]: file }));
@@ -7109,9 +7235,9 @@ function ClioAirtableMerger() {
                 {[
                   { key: 'airtableClients', label: 'Airtable Client Export', desc: 'Record ID + clio_contact_id', required: true },
                   { key: 'airtableCaseMaster', label: 'Airtable Case Master Export', desc: 'Record ID + clio_matter_id + PP ID', required: true },
-                  { key: 'clioEvents', label: 'Clio Events Export', desc: 'Google Calendar events', required: false },
+                  { key: 'clioEvents', label: 'Calendar ICS Export', desc: 'ICS calendar file with events', required: false, accept: '.ics,.csv' },
                   { key: 'clioRelationships', label: 'Clio Contact Related Matters', desc: 'ContactId, MatterId, RelationshipDescription', required: false },
-                ].map(({ key, label, desc, required }) => (
+                ].map(({ key, label, desc, required, accept }) => (
                   <div key={key}>
                     <h4 style={{ fontSize: '0.875rem', marginBottom: '0.5rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                       {label}
@@ -7123,14 +7249,14 @@ function ClioAirtableMerger() {
                         <button className="file-remove-btn" onClick={clearPhase3File(key)} title="Remove file">×</button>
                       )}
                       <label className={`upload-zone ${phase3Files[key] ? 'has-file' : ''}`}>
-                        <input type="file" accept=".csv" onChange={handleFileUpload(3, key)} style={{ display: 'none' }} />
+                        <input type="file" accept={accept || '.csv'} onChange={handleFileUpload(3, key)} style={{ display: 'none' }} />
                         {phase3Files[key] ? (
                           <div>
                             <span style={{ color: '#22c55e' }}>✓</span> {phase3Files[key].name}
-                            <div style={{ fontSize: '0.75rem', color: '#71717a' }}>{phase3Data[key]?.rows?.length || 0} rows</div>
+                            <div style={{ fontSize: '0.75rem', color: '#71717a' }}>{phase3Data[key]?.rows?.length || 0} {key === 'clioEvents' ? 'events' : 'rows'}</div>
                           </div>
                         ) : (
-                          <div style={{ color: '#71717a' }}>Drop CSV or click</div>
+                          <div style={{ color: '#71717a' }}>{key === 'clioEvents' ? 'Drop ICS/CSV or click' : 'Drop CSV or click'}</div>
                         )}
                       </label>
                     </div>
