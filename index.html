@@ -2163,7 +2163,8 @@ function ClioAirtableMerger() {
       }
 
       // Filter out computed field types that cannot be written to
-      const COMPUTED_FIELD_TYPES = ['formula', 'rollup', 'lookup', 'count', 'autoNumber', 'createdTime', 'lastModifiedTime', 'createdBy', 'lastModifiedBy'];
+      // Note: 'multipleLookupValues' is Airtable's actual type for lookup fields
+      const COMPUTED_FIELD_TYPES = ['formula', 'rollup', 'lookup', 'multipleLookupValues', 'count', 'autoNumber', 'createdTime', 'lastModifiedTime', 'createdBy', 'lastModifiedBy'];
 
       const allFields = caseMasterTable.fields.map(f => ({
         id: f.id,
@@ -2172,7 +2173,8 @@ function ClioAirtableMerger() {
         options: f.options || null,
       }));
 
-      const fields = allFields.filter(f => !COMPUTED_FIELD_TYPES.includes(f.type));
+      // Filter by type AND by name pattern "(from" which indicates lookup fields
+      const fields = allFields.filter(f => !COMPUTED_FIELD_TYPES.includes(f.type) && !f.name.includes('(from'));
       const skippedCount = allFields.length - fields.length;
 
       setCaseMasterSchema({
@@ -3717,9 +3719,11 @@ function ClioAirtableMerger() {
         // Skip if already handled above
         if (Object.values(ourFieldToAirtable).includes(config.fieldName)) return;
 
-        // Skip computed fields
-        const computedTypes = ['formula', 'rollup', 'lookup', 'count', 'autoNumber', 'createdTime', 'lastModifiedTime', 'createdBy', 'lastModifiedBy'];
+        // Skip computed fields (by type or by name pattern)
+        const computedTypes = ['formula', 'rollup', 'lookup', 'multipleLookupValues', 'count', 'autoNumber', 'createdTime', 'lastModifiedTime', 'createdBy', 'lastModifiedBy'];
         if (computedTypes.includes(config.fieldType)) return;
+        // Also skip lookup fields by name pattern "(from" which Airtable uses for lookup display names
+        if (config.fieldName && config.fieldName.includes('(from')) return;
 
         // Handle based on field type
         if (config.fieldType === 'multipleRecordLinks') {

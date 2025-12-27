@@ -284,12 +284,16 @@ class AirtableClient {
       };
 
       // Computed field types that cannot be written to
-      const computedTypes = ['formula', 'rollup', 'count', 'lookup', 'autoNumber', 'createdTime', 'lastModifiedTime', 'createdBy', 'lastModifiedBy', 'button'];
+      // Note: 'multipleLookupValues' is Airtable's actual type for lookup fields
+      const computedTypes = ['formula', 'rollup', 'count', 'lookup', 'multipleLookupValues', 'autoNumber', 'createdTime', 'lastModifiedTime', 'createdBy', 'lastModifiedBy', 'button'];
 
       table.fields.forEach(field => {
         schema.allFields.push(field.name);
 
-        if (computedTypes.includes(field.type)) {
+        // Skip computed fields by type, or by name pattern "(from" which indicates lookup
+        const isComputed = computedTypes.includes(field.type) || field.name.includes('(from');
+
+        if (isComputed) {
           schema.computedFields.push(field.name);
         } else {
           schema.writableFields.push(field.name);
@@ -419,8 +423,9 @@ const computeMergedFields = (keepRecord, deleteRecords, schema) => {
   const allRecords = [keepRecord, ...deleteRecords];
 
   // Get writable fields from schema, excluding Box fields
-  const linkFields = schema.linkFields.filter(f => !BOX_FIELDS.includes(f));
-  const textFields = schema.textFields.filter(f => !BOX_FIELDS.includes(f));
+  // Also exclude fields with "(from" in name - these are lookup fields (computed)
+  const linkFields = schema.linkFields.filter(f => !BOX_FIELDS.includes(f) && !f.includes('(from'));
+  const textFields = schema.textFields.filter(f => !BOX_FIELDS.includes(f) && !f.includes('(from'));
 
   // Merge link fields (combine all unique IDs)
   linkFields.forEach(field => {
