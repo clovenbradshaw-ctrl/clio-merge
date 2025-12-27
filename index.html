@@ -7947,28 +7947,28 @@ function ClioAirtableMerger() {
                       <button
                         onClick={() => uploadEventsToAirtable(true)}
                         disabled={phase3SyncState.loading || !phase3Result?.events?.length || phase3SyncState.judges.length === 0}
-                        style={{ fontSize: '0.8rem', padding: '0.5rem 1rem', background: !phase3Result?.events?.length ? '#78716c' : '#f59e0b', color: 'white', border: 'none', borderRadius: '6px', cursor: !phase3Result?.events?.length ? 'not-allowed' : 'pointer', opacity: !phase3Result?.events?.length ? 0.6 : 1 }}
+                        style={{ fontSize: '0.8rem', padding: '0.5rem 1rem', background: (phase3SyncState.loading || !phase3Result?.events?.length || phase3SyncState.judges.length === 0) ? '#78716c' : '#f59e0b', color: 'white', border: 'none', borderRadius: '6px', cursor: (phase3SyncState.loading || !phase3Result?.events?.length || phase3SyncState.judges.length === 0) ? 'not-allowed' : 'pointer', opacity: (phase3SyncState.loading || !phase3Result?.events?.length || phase3SyncState.judges.length === 0) ? 0.6 : 1 }}
                       >
                         2. Test Events (5)
                       </button>
                       <button
                         onClick={() => uploadEventsToAirtable(false)}
                         disabled={phase3SyncState.loading || !phase3Result?.events?.length || phase3SyncState.judges.length === 0}
-                        style={{ fontSize: '0.8rem', padding: '0.5rem 1rem', background: !phase3Result?.events?.length ? '#78716c' : '#10b981', color: 'white', border: 'none', borderRadius: '6px', cursor: !phase3Result?.events?.length ? 'not-allowed' : 'pointer', opacity: !phase3Result?.events?.length ? 0.6 : 1 }}
+                        style={{ fontSize: '0.8rem', padding: '0.5rem 1rem', background: (phase3SyncState.loading || !phase3Result?.events?.length || phase3SyncState.judges.length === 0) ? '#78716c' : '#10b981', color: 'white', border: 'none', borderRadius: '6px', cursor: (phase3SyncState.loading || !phase3Result?.events?.length || phase3SyncState.judges.length === 0) ? 'not-allowed' : 'pointer', opacity: (phase3SyncState.loading || !phase3Result?.events?.length || phase3SyncState.judges.length === 0) ? 0.6 : 1 }}
                       >
                         3. Upload All Events ({phase3Result?.events?.filter(e => e['Case Master']).length || 0})
                       </button>
                       <button
                         onClick={() => uploadRelationshipsToAirtable(true)}
                         disabled={phase3SyncState.loading || !phase3Result?.relationships?.length}
-                        style={{ fontSize: '0.8rem', padding: '0.5rem 1rem', background: !phase3Result?.relationships?.length ? '#78716c' : '#8b5cf6', color: 'white', border: 'none', borderRadius: '6px', cursor: !phase3Result?.relationships?.length ? 'not-allowed' : 'pointer', opacity: !phase3Result?.relationships?.length ? 0.6 : 1 }}
+                        style={{ fontSize: '0.8rem', padding: '0.5rem 1rem', background: (phase3SyncState.loading || !phase3Result?.relationships?.length) ? '#78716c' : '#8b5cf6', color: 'white', border: 'none', borderRadius: '6px', cursor: (phase3SyncState.loading || !phase3Result?.relationships?.length) ? 'not-allowed' : 'pointer', opacity: (phase3SyncState.loading || !phase3Result?.relationships?.length) ? 0.6 : 1 }}
                       >
                         4. Test Relationships (5)
                       </button>
                       <button
                         onClick={() => uploadRelationshipsToAirtable(false)}
                         disabled={phase3SyncState.loading || !phase3Result?.relationships?.length}
-                        style={{ fontSize: '0.8rem', padding: '0.5rem 1rem', background: !phase3Result?.relationships?.length ? '#78716c' : '#ec4899', color: 'white', border: 'none', borderRadius: '6px', cursor: !phase3Result?.relationships?.length ? 'not-allowed' : 'pointer', opacity: !phase3Result?.relationships?.length ? 0.6 : 1 }}
+                        style={{ fontSize: '0.8rem', padding: '0.5rem 1rem', background: (phase3SyncState.loading || !phase3Result?.relationships?.length) ? '#78716c' : '#ec4899', color: 'white', border: 'none', borderRadius: '6px', cursor: (phase3SyncState.loading || !phase3Result?.relationships?.length) ? 'not-allowed' : 'pointer', opacity: (phase3SyncState.loading || !phase3Result?.relationships?.length) ? 0.6 : 1 }}
                       >
                         5. Upload All Relationships ({phase3Result?.relationships?.filter(r => r['Case Master View'] && r['Object Client']).length || 0})
                       </button>
