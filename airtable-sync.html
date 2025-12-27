@@ -202,7 +202,7 @@ const AIRTABLE_CONFIG = {
       name: 'Case Master View',
       uniqueFields: ['clio_matter_id', 'PP ID'],
       fields: {
-        'Client': { type: 'link', required: true },
+        'Edit Client Info': { type: 'link', required: true },
         'clio_matter_id': { type: 'text', required: false },
         'PP ID': { type: 'text', required: false, computed: true }, // Computed field - ignored during upload
         'Description': { type: 'text', required: false },
@@ -893,7 +893,7 @@ function AirtableSync() {
       addLog(`Test sync successful: ${results.length} records created`, 'success');
 
       results.forEach((r, i) => {
-        addLog(`  Created: ${r.id} - ${r.fields['First Name'] || r.fields['Client'] || 'Record'} ${r.fields['Family Name'] || ''}`, 'info');
+        addLog(`  Created: ${r.id} - ${r.fields['First Name'] || r.fields['Edit Client Info'] || 'Record'} ${r.fields['Family Name'] || ''}`, 'info');
       });
 
       // Refresh existing records
