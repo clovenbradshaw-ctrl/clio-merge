@@ -749,6 +749,15 @@ const parseEventSummary = (summary) => {
 
   result.aNumber = extractANumber(working);
 
+  // Extract client name before stripping A-Number
+  // Patterns: "INDIVIDUAL TORRICO PEREZ DEL CERRO, CLAUDIA | A-Number: 220-971-739"
+  //           "ICH OKAFOR, CHRISTOPHER A-Number: 221-096-935"
+  //           "**TORG** IMH LOPEZ JIRON, DAMARIS ESTHER | A-Number: 244-445-909"
+  const clientNameMatch = working.match(/(?:MASTER|MCH|INDIVIDUAL|ICH|IMH|BOND|STATUS|CUSTODY|CALENDAR)\s+([A-Z][A-Za-z\s-]+(?:,\s*[A-Za-z\s-]+)?)\s*(?:\||A-?Number)/i);
+  if (clientNameMatch) {
+    result.clientName = clientNameMatch[1].trim().replace(/\s*\|\s*$/, '').trim();
+  }
+
   working = working
     .replace(/\|A-?Number:?\s*\d{3}-?\d{3}-?\d{3}/gi, '')
     .replace(/\|A-?\d{3}-?\d{3}-?\d{3}/gi, '')
@@ -764,7 +773,7 @@ const parseEventSummary = (summary) => {
   }
 
   // Extract hearing type
-  const HEARING_TYPES = ['MASTER', 'MCH', 'INDIVIDUAL', 'ICH', 'BOND', 'STATUS', 'CUSTODY', 'CALENDAR'];
+  const HEARING_TYPES = ['MASTER', 'MCH', 'INDIVIDUAL', 'ICH', 'IMH', 'BOND', 'STATUS', 'CUSTODY', 'CALENDAR'];
   for (const typeKw of HEARING_TYPES) {
     if (working.toUpperCase().includes(typeKw)) {
       result.hearingType = typeKw;
@@ -4784,25 +4793,49 @@ function ClioAirtableMerger() {
       reports.push({ type: 'info', message: `Loaded ${clioContactToRecordId.size} client mappings` });
     }
 
+    // Store all Case Masters for each A# (one A# can have multiple matters)
+    const aNumberToCaseMasters = new Map(); // A# -> array of case master info
+
     if (phase3Data.airtableCaseMaster?.rows) {
       phase3Data.airtableCaseMaster.rows.forEach((row) => {
         const recordId = row['Record ID'] || row['recordId'] || '';
         const clioMatterId = row['clio_matter_id'] || '';
         const displayNumber = row['PP ID'] || '';
+        const aNumber = row['A#'] || row['a_number'] || row['A Number'] || '';
+        const description = row['Description'] || row['description'] || '';
+        const clientName = row['Client Name'] || row['client_name'] || '';
 
         if (clioMatterId && recordId) {
           clioMatterToRecordId.set(clioMatterId, recordId);
         }
         if (displayNumber && recordId) {
-          // Extract just the number part for matching (e.g., "00006" from "00006-Hernandez")
           const numMatch = displayNumber.match(/^(\d+)/);
           if (numMatch) {
             displayNumberToRecordId.set(numMatch[1], recordId);
           }
           displayNumberToRecordId.set(displayNumber, recordId);
         }
+
+        // Build A# to Case Masters lookup (supports multiple matters per A#)
+        if (aNumber && recordId) {
+          const normalizedANum = aNumber.replace(/[^0-9]/g, '');
+          const caseMasterInfo = {
+            recordId,
+            aNumber,
+            normalizedANum,
+            description,
+            clientName,
+            ppId: displayNumber,
+          };
+
+          // Store in array - one A# can have multiple Case Masters
+          if (!aNumberToCaseMasters.has(normalizedANum)) {
+            aNumberToCaseMasters.set(normalizedANum, []);
+          }
+          aNumberToCaseMasters.get(normalizedANum).push(caseMasterInfo);
+        }
       });
-      reports.push({ type: 'info', message: `Loaded ${clioMatterToRecordId.size} case master mappings` });
+      reports.push({ type: 'info', message: `Loaded ${clioMatterToRecordId.size} case master mappings (${aNumberToCaseMasters.size} unique A#s)` });
     }
 
     // Process Events
@@ -4826,13 +4859,70 @@ function ClioAirtableMerger() {
           return;
         }
 
-        // Try to find Case Master View by matter ID from summary
+        // Try to find Case Master View - prioritize A# matching with client name disambiguation
         let caseMasterRecordId = '';
-        if (summaryParsed.matterId) {
-          // Try full match first
-          caseMasterRecordId = displayNumberToRecordId.get(summaryParsed.matterId) || '';
+        let matchedCaseMaster = null;
 
-          // Try just the number part
+        // 1. First try matching by A# from the event summary
+        if (summaryParsed.aNumber) {
+          const normalizedEventANum = summaryParsed.aNumber.replace(/[^0-9]/g, '');
+          const caseMasters = aNumberToCaseMasters.get(normalizedEventANum) || [];
+
+          if (caseMasters.length === 1) {
+            // Single match - use it
+            matchedCaseMaster = caseMasters[0];
+            caseMasterRecordId = matchedCaseMaster.recordId;
+          } else if (caseMasters.length > 1) {
+            // Multiple matches - try to disambiguate by client name from event summary
+            const eventClientName = summaryParsed.clientName || '';
+            const eventNameNormalized = eventClientName.toLowerCase().replace(/[^a-z]/g, '');
+
+            // Score each case master by name similarity
+            let bestMatch = null;
+            let bestScore = 0;
+
+            for (const cm of caseMasters) {
+              const cmNameNormalized = (cm.clientName || cm.description || '').toLowerCase().replace(/[^a-z]/g, '');
+
+              // Check for substring match or word overlap
+              let score = 0;
+              if (eventNameNormalized && cmNameNormalized) {
+                // Check if names contain each other
+                if (cmNameNormalized.includes(eventNameNormalized) || eventNameNormalized.includes(cmNameNormalized)) {
+                  score = 100;
+                } else {
+                  // Check word overlap
+                  const eventWords = eventClientName.toLowerCase().split(/[\s,]+/).filter(w => w.length > 2);
+                  const cmWords = (cm.clientName || cm.description || '').toLowerCase().split(/[\s,]+/).filter(w => w.length > 2);
+                  const overlap = eventWords.filter(w => cmWords.some(cw => cw.includes(w) || w.includes(cw))).length;
+                  score = overlap * 20;
+                }
+              }
+
+              if (score > bestScore) {
+                bestScore = score;
+                bestMatch = cm;
+              }
+            }
+
+            if (bestMatch && bestScore > 0) {
+              matchedCaseMaster = bestMatch;
+              caseMasterRecordId = bestMatch.recordId;
+              if (caseMasters.length > 1) {
+                reports.push({ type: 'info', message: `A# ${summaryParsed.aNumber}: matched "${eventClientName}" to "${bestMatch.clientName || bestMatch.ppId}" (${caseMasters.length} options)` });
+              }
+            } else {
+              // No good name match - use the first one and warn
+              matchedCaseMaster = caseMasters[0];
+              caseMasterRecordId = caseMasters[0].recordId;
+              reports.push({ type: 'warning', message: `A# ${summaryParsed.aNumber}: ${caseMasters.length} Case Masters found, using first (${caseMasters[0].ppId}). Event: "${eventClientName}"` });
+            }
+          }
+        }
+
+        // 2. Fallback to PP ID/matter ID if no A# match
+        if (!caseMasterRecordId && summaryParsed.matterId) {
+          caseMasterRecordId = displayNumberToRecordId.get(summaryParsed.matterId) || '';
           if (!caseMasterRecordId) {
             const numMatch = summaryParsed.matterId.match(/^(\d+)/);
             if (numMatch) {
@@ -4845,7 +4935,7 @@ function ClioAirtableMerger() {
           eventsLinked++;
         } else {
           eventsUnlinked++;
-          reports.push({ type: 'warning', message: `Event not linked to Case Master: ${summaryParsed.matterId || 'no matter ID'}` });
+          reports.push({ type: 'warning', message: `Event not linked to Case Master: A# ${summaryParsed.aNumber}` });
         }
 
         const court = location || descParsed.courtAddress || '';
