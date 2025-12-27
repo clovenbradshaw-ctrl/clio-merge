@@ -548,12 +548,25 @@ const buildDedupeKey = (record) => {
   const firstName = normalizeName(fields['First Name'] || '');
   const familyName = normalizeName(fields['Family Name'] || '');
 
-  // Only create key if we have both first and family name
+  // If we have both first and family name, combine and sort
   if (firstName && familyName) {
     // Sort the name parts alphabetically to handle name order variations
     // e.g., "danny sarabia" and "sarabia danny" both become "danny|sarabia"
     const parts = [firstName, familyName].sort();
     return parts.join('|');
+  }
+
+  // If we only have family name, use it as the key
+  if (familyName) {
+    // Split family name into words and sort them for consistency
+    const words = familyName.split(' ').filter(Boolean).sort();
+    return words.join('|');
+  }
+
+  // If we only have first name, use it as the key
+  if (firstName) {
+    const words = firstName.split(' ').filter(Boolean).sort();
+    return words.join('|');
   }
 
   // Fallback: use normalized display name if structured fields unavailable
