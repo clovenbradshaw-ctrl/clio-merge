@@ -659,10 +659,11 @@ const parseICS = (text) => {
       'end.dateTime': parseICSDate(event.DTEND || ''),
       'location': decodeICS(event.LOCATION || ''),
       'uid': event.UID || '',
+      'notes': decodeICS(event.COMMENT || event['X-CLIO-NOTES'] || ''),
     };
   });
 
-  const headers = ['summary', 'description', 'start.dateTime', 'end.dateTime', 'location', 'uid'];
+  const headers = ['summary', 'description', 'start.dateTime', 'end.dateTime', 'location', 'uid', 'notes'];
   return { headers, rows };
 };
 
@@ -5302,10 +5303,11 @@ function ClioAirtableMerger() {
 
     if (phase3Data.clioEvents?.rows) {
       phase3Data.clioEvents.rows.forEach((row) => {
-        const summary = row['summary'] || '';
+        const summary = row['summary'] || row['Title'] || '';
         const description = row['description'] || '';
-        const startDateTime = row['start.dateTime'] || '';
+        const startDateTime = row['start.dateTime'] || row['Given planned earliest start'] || '';
         const location = row['location'] || '';
+        const notes = row['Notes'] || row['notes'] || '';
 
         const summaryParsed = parseEventSummary(summary);
         const descParsed = parseEventDescription(description);
@@ -5401,6 +5403,7 @@ function ClioAirtableMerger() {
 
         eventsOutput.push({
           'Case Master': caseMasterRecordId ? [caseMasterRecordId] : [], // Link to Case Master View (must be array)
+          'Case Master Record ID': caseMasterRecordId || '', // Airtable ID as plain string for export
           'A#': summaryParsed.aNumber,
           'Hearing Date/Time': startDateTime,
           'Event Type': 'Hearing',
@@ -5409,6 +5412,7 @@ function ClioAirtableMerger() {
           'Judge': descParsed.judge,
           'MCH Attny': [ANDREW_BAHR_RECORD_ID], // Link field (must be array)
           'Bahr Client': 'TRUE',
+          'Notes': notes, // Notes from ICS/CSV
           '_summary': summary.slice(0, 100),
           '_clientName': summaryParsed.clientName || '',
           '_orphan': isOrphan,
@@ -5799,6 +5803,20 @@ function ClioAirtableMerger() {
   const downloadCSV = (data, filename, headers) => {
     const csv = generateCSV(headers, data);
     const blob = new Blob([csv], { type: 'text/csv' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.style.display = 'none';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  const downloadJSON = (data, filename) => {
+    const json = JSON.stringify(data, null, 2);
+    const blob = new Blob([json], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
@@ -7666,16 +7684,37 @@ function ClioAirtableMerger() {
 
               {phase3Result && (
                 <div>
-                  <div style={{ display: 'flex', gap: '1rem', marginBottom: '1.5rem' }}>
+                  <div style={{ display: 'flex', gap: '1rem', marginBottom: '1rem', flexWrap: 'wrap' }}>
                     <button
                       className="btn btn-secondary"
                       onClick={() => downloadCSV(
                         phase3Result.events,
                         'phase3_events.csv',
-                        ['Case Master', 'A#', 'Hearing Date/Time', 'Event Type', 'Event Hearing Type', 'Court', 'Judge', 'MCH Attny', 'Bahr Client', '_summary']
+                        ['Case Master Record ID', 'A#', 'Hearing Date/Time', 'Event Type', 'Event Hearing Type', 'Court', 'Judge', 'Notes', 'Bahr Client', '_summary', '_clientName']
                       )}
                     >
                       Download events.csv ({phase3Result.events.length})
+                    </button>
+
+                    <button
+                      className="btn btn-secondary"
+                      style={{ background: '#8b5cf6' }}
+                      onClick={() => downloadJSON(
+                        phase3Result.events.map(e => ({
+                          'Case Master Record ID': e['Case Master Record ID'],
+                          'A#': e['A#'],
+                          'Hearing Date/Time': e['Hearing Date/Time'],
+                          'Event Type': e['Event Type'],
+                          'Event Hearing Type': e['Event Hearing Type'],
+                          'Court': e['Court'],
+                          'Judge': e['Judge'],
+                          'Notes': e['Notes'],
+                          'Client Name': e['_clientName'],
+                        })),
+                        'phase3_events.json'
+                      )}
+                    >
+                      Download events.json ({phase3Result.events.length})
                     </button>
 
                     <button
@@ -7690,17 +7729,46 @@ function ClioAirtableMerger() {
                     </button>
 
                     {phase3Result.caseContent?.length > 0 && (
-                      <button
-                        className="btn btn-secondary"
-                        style={{ background: '#0ea5e9' }}
-                        onClick={() => downloadCSV(
-                          phase3Result.caseContent,
-                          'phase3_case_content.csv',
-                          ['PP ID', 'Case Description', 'Case Type', 'Case Status', 'Client Name', 'Client A#', 'Client Email', 'Client Phone', 'Client DOB', 'Country of Origin', 'Court Name', 'Judge', 'Filing Date', 'Next Hearing', 'Case Notes', 'Case Master Record ID', 'Client Record ID', 'Clio Matter ID']
-                        )}
-                      >
-                        Download case_content.csv ({phase3Result.caseContent.length})
-                      </button>
+                      <>
+                        <button
+                          className="btn btn-secondary"
+                          style={{ background: '#0ea5e9' }}
+                          onClick={() => downloadCSV(
+                            phase3Result.caseContent,
+                            'phase3_case_content.csv',
+                            ['Case Master Record ID', 'PP ID', 'Case Description', 'Case Type', 'Case Status', 'Client Name', 'Client A#', 'Client Email', 'Client Phone', 'Client DOB', 'Country of Origin', 'Court Name', 'Judge', 'Filing Date', 'Next Hearing', 'Case Notes', 'Client Record ID', 'Clio Matter ID']
+                          )}
+                        >
+                          Download case_content.csv ({phase3Result.caseContent.length})
+                        </button>
+                        <button
+                          className="btn btn-secondary"
+                          style={{ background: '#10b981' }}
+                          onClick={() => downloadJSON(
+                            phase3Result.caseContent.map(c => ({
+                              'Case Master Record ID': c['Case Master Record ID'],
+                              'PP ID': c['PP ID'],
+                              'Case Description': c['Case Description'],
+                              'Case Type': c['Case Type'],
+                              'Case Status': c['Case Status'],
+                              'Client Name': c['Client Name'],
+                              'Client A#': c['Client A#'],
+                              'Client Email': c['Client Email'],
+                              'Client Phone': c['Client Phone'],
+                              'Client DOB': c['Client DOB'],
+                              'Country of Origin': c['Country of Origin'],
+                              'Court Name': c['Court Name'],
+                              'Judge': c['Judge'],
+                              'Filing Date': c['Filing Date'],
+                              'Next Hearing': c['Next Hearing'],
+                              'Case Notes': c['Case Notes'],
+                            })),
+                            'phase3_case_content.json'
+                          )}
+                        >
+                          Download case_content.json ({phase3Result.caseContent.length})
+                        </button>
+                      </>
                     )}
                   </div>
 
