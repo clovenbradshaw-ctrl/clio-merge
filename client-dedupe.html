@@ -518,11 +518,17 @@ const updateFlatpackWithMergeNote = (currentFlatpack, mergeNote) => {
 // NAME NORMALIZATION
 // ============================================
 
-// Normalize a name for comparison (remove punctuation, extra spaces, lowercase)
+// Remove accents/diacritics from a string (e.g., "García" -> "garcia")
+const removeAccents = (str) => {
+  if (!str) return '';
+  return str.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+};
+
+// Normalize a name for comparison (remove punctuation, accents, extra spaces, lowercase)
 const normalizeName = (name) => {
   if (!name) return '';
 
-  return name
+  return removeAccents(name)
     .toLowerCase()
     .trim()
     // Remove common suffixes/prefixes
@@ -533,6 +539,34 @@ const normalizeName = (name) => {
     // Remove extra whitespace
     .replace(/\s+/g, ' ')
     .trim();
+};
+
+// Build a deduplication key from First Name and Family Name fields
+// This is more reliable than using display names which can have different formats
+const buildDedupeKey = (record) => {
+  const fields = record.fields || {};
+  const firstName = normalizeName(fields['First Name'] || '');
+  const familyName = normalizeName(fields['Family Name'] || '');
+
+  // Only create key if we have both first and family name
+  if (firstName && familyName) {
+    // Sort the name parts alphabetically to handle name order variations
+    // e.g., "danny sarabia" and "sarabia danny" both become "danny|sarabia"
+    const parts = [firstName, familyName].sort();
+    return parts.join('|');
+  }
+
+  // Fallback: use normalized display name if structured fields unavailable
+  const displayName = getDisplayName(record);
+  if (displayName) {
+    // Split display name into words and sort them
+    const words = normalizeName(displayName).split(' ').filter(Boolean).sort();
+    if (words.length >= 2) {
+      return words.join('|');
+    }
+  }
+
+  return '';
 };
 
 // Build a composite name from first/middle/family name fields
@@ -727,23 +761,24 @@ function App() {
   // Find duplicate records
   const findDuplicates = (records) => {
     addLog('Analyzing records for duplicates...', 'info');
+    addLog('Using First Name + Family Name fields for deduplication', 'info');
 
-    // Group records by normalized name
+    // Group records by deduplication key (First Name + Family Name)
     const nameGroups = new Map();
 
     records.forEach(record => {
-      const name = getDisplayName(record);
-      const normalizedName = normalizeName(name);
+      const dedupeKey = buildDedupeKey(record);
 
-      if (!normalizedName) {
-        addLog(`Skipping record ${record.id} - no name found`, 'warning');
+      if (!dedupeKey) {
+        const displayName = getDisplayName(record);
+        addLog(`Skipping record ${record.id} (${displayName}) - no First Name/Family Name found`, 'warning');
         return;
       }
 
-      if (!nameGroups.has(normalizedName)) {
-        nameGroups.set(normalizedName, []);
+      if (!nameGroups.has(dedupeKey)) {
+        nameGroups.set(dedupeKey, []);
       }
-      nameGroups.get(normalizedName).push(record);
+      nameGroups.get(dedupeKey).push(record);
     });
 
     // Find groups with more than one record (duplicates)
