@@ -2101,8 +2101,8 @@ function ClioAirtableMerger() {
 
     const eventsToCreate = testMode ? phase3Result.events.slice(0, 5) : phase3Result.events;
 
-    // Filter to only events with Case Master links
-    const validEvents = eventsToCreate.filter(e => e['Case Master']);
+    // Filter to only events with Case Master links (check array has items)
+    const validEvents = eventsToCreate.filter(e => e['Case Master']?.length > 0);
 
     if (validEvents.length === 0) {
       addPhase3Log('No events with valid Case Master links to upload', 'warning');
@@ -2126,7 +2126,7 @@ function ClioAirtableMerger() {
 
       const airtableRecords = batch.map(event => {
         const fields = {
-          'Case Master': [event['Case Master']], // Link field - array of record IDs
+          'Case Master': event['Case Master'], // Link field - already an array of record IDs
           'Hearing Date/Time': event['Hearing Date/Time'] || null,
           'Event Type': 'Court Event',
           'Event Hearing Type': mapEventHearingType(event['Event Hearing Type']) ? [mapEventHearingType(event['Event Hearing Type'])] : ['Master'],
@@ -5413,6 +5413,10 @@ function ClioAirtableMerger() {
           'MCH Attny': [ANDREW_BAHR_RECORD_ID], // Link field (must be array)
           'Bahr Client': 'TRUE',
           'Notes': notes, // Notes from ICS/CSV
+          // Raw ICS fields for exports
+          '_rawSummary': summary, // Full original summary
+          '_rawDescription': description, // Full original description (HTML with judge, court, etc.)
+          '_rawLocation': location, // Original location field
           '_summary': summary.slice(0, 100),
           '_clientName': summaryParsed.clientName || '',
           '_orphan': isOrphan,
@@ -7690,7 +7694,7 @@ function ClioAirtableMerger() {
                       onClick={() => downloadCSV(
                         phase3Result.events,
                         'phase3_events.csv',
-                        ['Case Master Record ID', 'A#', 'Hearing Date/Time', 'Event Type', 'Event Hearing Type', 'Court', 'Judge', 'Notes', 'Bahr Client', '_summary', '_clientName']
+                        ['Case Master Record ID', 'A#', 'Hearing Date/Time', 'Event Type', 'Event Hearing Type', 'Court', 'Judge', 'Notes', '_clientName', '_rawSummary', '_rawDescription', '_rawLocation']
                       )}
                     >
                       Download events.csv ({phase3Result.events.length})
@@ -7710,6 +7714,9 @@ function ClioAirtableMerger() {
                           'Judge': e['Judge'],
                           'Notes': e['Notes'],
                           'Client Name': e['_clientName'],
+                          'Raw Summary': e['_rawSummary'],
+                          'Raw Description': e['_rawDescription'],
+                          'Raw Location': e['_rawLocation'],
                         })),
                         'phase3_events.json'
                       )}
