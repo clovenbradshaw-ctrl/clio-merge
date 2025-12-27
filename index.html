@@ -5306,7 +5306,9 @@ function ClioAirtableMerger() {
         const summary = row['summary'] || row['Title'] || '';
         const description = row['description'] || '';
         const startDateTime = row['start.dateTime'] || row['Given planned earliest start'] || '';
+        const endDateTime = row['end.dateTime'] || '';
         const location = row['location'] || '';
+        const uid = row['uid'] || '';
         const notes = row['Notes'] || row['notes'] || '';
 
         const summaryParsed = parseEventSummary(summary);
@@ -5413,10 +5415,14 @@ function ClioAirtableMerger() {
           'MCH Attny': [ANDREW_BAHR_RECORD_ID], // Link field (must be array)
           'Bahr Client': 'TRUE',
           'Notes': notes, // Notes from ICS/CSV
-          // Raw ICS fields for exports
+          // Raw ICS fields for exports (preserve all original ICS data)
           '_rawSummary': summary, // Full original summary
           '_rawDescription': description, // Full original description (HTML with judge, court, etc.)
+          '_rawStartDateTime': startDateTime, // Original start date/time
+          '_rawEndDateTime': endDateTime, // Original end date/time
           '_rawLocation': location, // Original location field
+          '_rawUid': uid, // Original UID from ICS
+          '_rawNotes': notes, // Original notes/comments from ICS
           '_summary': summary.slice(0, 100),
           '_clientName': summaryParsed.clientName || '',
           '_orphan': isOrphan,
@@ -7694,7 +7700,7 @@ function ClioAirtableMerger() {
                       onClick={() => downloadCSV(
                         phase3Result.events,
                         'phase3_events.csv',
-                        ['Case Master Record ID', 'A#', 'Hearing Date/Time', 'Event Type', 'Event Hearing Type', 'Court', 'Judge', 'Notes', '_clientName', '_rawSummary', '_rawDescription', '_rawLocation']
+                        ['Case Master Record ID', 'A#', 'Hearing Date/Time', 'Event Type', 'Event Hearing Type', 'Court', 'Judge', 'Notes', '_clientName', '_rawSummary', '_rawDescription', '_rawStartDateTime', '_rawEndDateTime', '_rawLocation', '_rawUid', '_rawNotes']
                       )}
                     >
                       Download events.csv ({phase3Result.events.length})
@@ -7714,9 +7720,14 @@ function ClioAirtableMerger() {
                           'Judge': e['Judge'],
                           'Notes': e['Notes'],
                           'Client Name': e['_clientName'],
+                          // Raw ICS fields (original values from ICS file)
                           'Raw Summary': e['_rawSummary'],
                           'Raw Description': e['_rawDescription'],
+                          'Raw Start DateTime': e['_rawStartDateTime'],
+                          'Raw End DateTime': e['_rawEndDateTime'],
                           'Raw Location': e['_rawLocation'],
+                          'Raw UID': e['_rawUid'],
+                          'Raw Notes': e['_rawNotes'],
                         })),
                         'phase3_events.json'
                       )}
