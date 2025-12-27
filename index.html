@@ -4748,12 +4748,37 @@ function ClioAirtableMerger() {
     const clioMatterToRecordId = new Map();
     const displayNumberToRecordId = new Map();
 
+    // Store full client info for case content merge
+    const clientRecordIdToInfo = new Map();
+    const clioContactToClientInfo = new Map();
+
     if (phase3Data.airtableClients?.rows) {
       phase3Data.airtableClients.rows.forEach((row) => {
         const recordId = row['Record ID'] || row['recordId'] || '';
         const clioContactId = row['clio_contact_id'] || '';
-        if (clioContactId && recordId) {
+
+        // Store full client info
+        const clientInfo = {
+          recordId,
+          clioContactId,
+          firstName: row['First Name'] || row['first_name'] || '',
+          lastName: row['Family Name'] || row['Last Name'] || row['last_name'] || '',
+          aNumber: row['A#'] || row['Client ID'] || row['a_number'] || '',
+          email: row['Email'] || row['email'] || '',
+          phone: row['Phone'] || row['phone'] || '',
+          address: row['Address'] || row['address'] || '',
+          dateOfBirth: row['Date of Birth'] || row['DOB'] || row['dob'] || '',
+          countryOfOrigin: row['Country of Origin'] || row['country_of_origin'] || '',
+          status: row['Status'] || row['status'] || '',
+          intakeDate: row['Intake Date'] || row['intake_date'] || '',
+        };
+
+        if (recordId) {
+          clientRecordIdToInfo.set(recordId, clientInfo);
+        }
+        if (clioContactId) {
           clioContactToRecordId.set(clioContactId, recordId);
+          clioContactToClientInfo.set(clioContactId, clientInfo);
         }
       });
       reports.push({ type: 'info', message: `Loaded ${clioContactToRecordId.size} client mappings` });
@@ -4898,7 +4923,85 @@ function ClioAirtableMerger() {
       reports.push({ type: 'info', message: `Processed ${relationshipsOutput.length} relationships (${relsLinked} linked, ${relsUnlinked} unlinked)` });
     }
 
-    setPhase3Result({ events: eventsOutput, relationships: relationshipsOutput });
+    // Process Case Content - merge Client Info and Case Master View
+    const caseContentOutput = [];
+    let caseContentLinked = 0;
+    let caseContentUnlinked = 0;
+
+    if (phase3Data.airtableCaseMaster?.rows) {
+      phase3Data.airtableCaseMaster.rows.forEach((row) => {
+        const recordId = row['Record ID'] || row['recordId'] || '';
+        const ppId = row['PP ID'] || '';
+        const description = row['Description'] || row['description'] || '';
+        const clioMatterId = row['clio_matter_id'] || '';
+        const clientRecordId = row['Client'] || row['client'] || '';
+        const caseType = row['Case Type'] || row['case_type'] || '';
+        const caseStatus = row['Case Status'] || row['Status'] || row['status'] || '';
+        const courtName = row['Court Name'] || row['court_name'] || '';
+        const judgeName = row['Judge'] || row['judge'] || '';
+        const filingDate = row['Filing Date'] || row['filing_date'] || '';
+        const nextHearing = row['Next Hearing'] || row['next_hearing'] || '';
+        const notes = row['Notes'] || row['notes'] || '';
+
+        // Find linked client info
+        let clientInfo = null;
+
+        // Try to find client by linked record ID
+        if (clientRecordId) {
+          // Handle array format (Airtable linked records may export as comma-separated)
+          const clientIds = clientRecordId.includes(',')
+            ? clientRecordId.split(',').map(s => s.trim())
+            : [clientRecordId.trim()];
+
+          for (const cId of clientIds) {
+            if (clientRecordIdToInfo.has(cId)) {
+              clientInfo = clientRecordIdToInfo.get(cId);
+              break;
+            }
+          }
+        }
+
+        if (clientInfo) {
+          caseContentLinked++;
+        } else {
+          caseContentUnlinked++;
+        }
+
+        // Create merged case content record
+        caseContentOutput.push({
+          // Case Master View fields
+          'Case Master Record ID': recordId,
+          'PP ID': ppId,
+          'Case Description': description,
+          'Clio Matter ID': clioMatterId,
+          'Case Type': caseType,
+          'Case Status': caseStatus,
+          'Court Name': courtName,
+          'Judge': judgeName,
+          'Filing Date': filingDate,
+          'Next Hearing': nextHearing,
+          'Case Notes': notes,
+          // Client Info fields (merged)
+          'Client Record ID': clientInfo?.recordId || clientRecordId || '',
+          'Client Name': clientInfo ? `${clientInfo.firstName} ${clientInfo.lastName}`.trim() : '',
+          'Client First Name': clientInfo?.firstName || '',
+          'Client Last Name': clientInfo?.lastName || '',
+          'Client A#': clientInfo?.aNumber || '',
+          'Client Email': clientInfo?.email || '',
+          'Client Phone': clientInfo?.phone || '',
+          'Client DOB': clientInfo?.dateOfBirth || '',
+          'Country of Origin': clientInfo?.countryOfOrigin || '',
+          'Client Status': clientInfo?.status || '',
+          'Intake Date': clientInfo?.intakeDate || '',
+          // Helper fields
+          '_linked': !!clientInfo,
+        });
+      });
+
+      reports.push({ type: 'info', message: `Merged ${caseContentOutput.length} case records (${caseContentLinked} with client info, ${caseContentUnlinked} without)` });
+    }
+
+    setPhase3Result({ events: eventsOutput, relationships: relationshipsOutput, caseContent: caseContentOutput });
     setPhase3Report(reports);
   }, [phase3Data]);
 
@@ -6939,7 +7042,7 @@ function ClioAirtableMerger() {
             <div>
               <h2 style={{ marginBottom: '1rem', fontSize: '1.25rem' }}>Phase 3: Events & Relationships</h2>
               <p style={{ color: '#71717a', marginBottom: '1.5rem', fontSize: '0.875rem' }}>
-                Create Events linked to Case Master Views, and Relationships between clients.
+                Create Events linked to Case Master Views, Relationships between clients, and import merged content from Client Info and Case Master View.
               </p>
 
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '1rem', marginBottom: '1.5rem' }}>
@@ -6981,7 +7084,7 @@ function ClioAirtableMerger() {
                 disabled={!phase3Data.airtableClients?.rows?.length || !phase3Data.airtableCaseMaster?.rows?.length}
                 style={{ marginBottom: '1.5rem' }}
               >
-                Generate events.csv & relationships.csv
+                Generate Events, Relationships & Case Content
               </button>
 
               {phase3Report.length > 0 && (
@@ -7022,6 +7125,20 @@ function ClioAirtableMerger() {
                     >
                       Download relationships.csv ({phase3Result.relationships.length})
                     </button>
+
+                    {phase3Result.caseContent?.length > 0 && (
+                      <button
+                        className="btn btn-secondary"
+                        style={{ background: '#0ea5e9' }}
+                        onClick={() => downloadCSV(
+                          phase3Result.caseContent,
+                          'phase3_case_content.csv',
+                          ['PP ID', 'Case Description', 'Case Type', 'Case Status', 'Client Name', 'Client A#', 'Client Email', 'Client Phone', 'Client DOB', 'Country of Origin', 'Court Name', 'Judge', 'Filing Date', 'Next Hearing', 'Case Notes', 'Case Master Record ID', 'Client Record ID', 'Clio Matter ID']
+                        )}
+                      >
+                        Download case_content.csv ({phase3Result.caseContent.length})
+                      </button>
+                    )}
                   </div>
 
                   {phase3Result.events.length > 0 && (
@@ -7053,7 +7170,7 @@ function ClioAirtableMerger() {
                   )}
 
                   {phase3Result.relationships.length > 0 && (
-                    <div>
+                    <div style={{ marginBottom: '1.5rem' }}>
                       <h4 style={{ marginBottom: '0.5rem' }}>Relationships Preview</h4>
                       <div className="table-container">
                         <table>
@@ -7072,6 +7189,43 @@ function ClioAirtableMerger() {
                                 <td style={{ fontFamily: 'monospace', fontSize: '0.7rem' }}>{row['Object Client'] ? row['Object Client'].slice(0, 12) + '...' : '—'}</td>
                                 <td>{row['Relationship']}</td>
                                 <td>{row['_contact_name']}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  )}
+
+                  {phase3Result.caseContent?.length > 0 && (
+                    <div style={{ marginBottom: '1.5rem' }}>
+                      <h4 style={{ marginBottom: '0.5rem', color: '#0ea5e9' }}>Case Content Preview (Client Info + Case Master)</h4>
+                      <p style={{ fontSize: '0.75rem', color: '#71717a', marginBottom: '0.5rem' }}>
+                        Merged content from both Client Info and Case Master View tables
+                      </p>
+                      <div className="table-container">
+                        <table>
+                          <thead>
+                            <tr>
+                              <th>PP ID</th>
+                              <th>Client Name</th>
+                              <th>A#</th>
+                              <th>Case Type</th>
+                              <th>Status</th>
+                              <th>Linked</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {phase3Result.caseContent.slice(0, 10).map((row, i) => (
+                              <tr key={i}>
+                                <td>{row['PP ID'] || '—'}</td>
+                                <td>{row['Client Name'] || '—'}</td>
+                                <td>{row['Client A#'] || '—'}</td>
+                                <td>{row['Case Type'] || '—'}</td>
+                                <td>{row['Case Status'] || '—'}</td>
+                                <td style={{ color: row['_linked'] ? '#10b981' : '#f59e0b' }}>
+                                  {row['_linked'] ? 'Yes' : 'No'}
+                                </td>
                               </tr>
                             ))}
                           </tbody>
@@ -7100,7 +7254,7 @@ function ClioAirtableMerger() {
                     </div>
 
                     {/* Stats Row */}
-                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '0.5rem', marginBottom: '1rem' }}>
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: '0.5rem', marginBottom: '1rem' }}>
                       <div style={{ background: '#1e293b', padding: '0.75rem', borderRadius: '6px', textAlign: 'center' }}>
                         <div style={{ fontSize: '1.5rem', fontWeight: 'bold', color: '#6366f1' }}>{phase3Result?.events?.length || 0}</div>
                         <div style={{ fontSize: '0.7rem', color: '#94a3b8' }}>Events</div>
@@ -7112,6 +7266,10 @@ function ClioAirtableMerger() {
                       <div style={{ background: '#1e293b', padding: '0.75rem', borderRadius: '6px', textAlign: 'center' }}>
                         <div style={{ fontSize: '1.5rem', fontWeight: 'bold', color: '#8b5cf6' }}>{phase3Result?.relationships?.length || 0}</div>
                         <div style={{ fontSize: '0.7rem', color: '#94a3b8' }}>Relationships</div>
+                      </div>
+                      <div style={{ background: '#1e293b', padding: '0.75rem', borderRadius: '6px', textAlign: 'center' }}>
+                        <div style={{ fontSize: '1.5rem', fontWeight: 'bold', color: '#0ea5e9' }}>{phase3Result?.caseContent?.length || 0}</div>
+                        <div style={{ fontSize: '0.7rem', color: '#94a3b8' }}>Case Content</div>
                       </div>
                       <div style={{ background: '#1e293b', padding: '0.75rem', borderRadius: '6px', textAlign: 'center' }}>
                         <div style={{ fontSize: '1.5rem', fontWeight: 'bold', color: '#f59e0b' }}>{phase3SyncState.judges.length + phase3SyncState.users.length}</div>
