@@ -76,6 +76,166 @@ const XANO_CASE_NOTES_SCHEMA = {
   eventId: 'text',
 };
 
+// ================================================================================
+// FIELD HISTORY & PROVENANCE TRACKING SYSTEM
+// ================================================================================
+
+class FieldHistoryManager {
+  constructor() {
+    const stored = localStorage.getItem('field_history_data');
+    if (stored) {
+      try {
+        const parsed = JSON.parse(stored);
+        this.history = parsed.history || [];
+        this.recordProvenance = parsed.recordProvenance || {};
+        this.sessionId = this.generateSessionId();
+      } catch (e) {
+        this.history = [];
+        this.recordProvenance = {};
+        this.sessionId = this.generateSessionId();
+      }
+    } else {
+      this.history = [];
+      this.recordProvenance = {};
+      this.sessionId = this.generateSessionId();
+    }
+    this.maxHistorySize = 50000;
+  }
+
+  generateSessionId() {
+    return `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+  }
+
+  recordChange(params) {
+    const { recordId, recordIdentifier, tableName, fieldName, oldValue, newValue, source, operation = 'UPDATE', reason = '', sourceMetadata = {} } = params;
+    if (this.valuesEqual(oldValue, newValue)) return null;
+
+    const entry = {
+      id: `change_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+      timestamp: new Date().toISOString(),
+      sessionId: this.sessionId,
+      recordId, recordIdentifier, tableName, fieldName,
+      oldValue: this.serializeValue(oldValue),
+      newValue: this.serializeValue(newValue),
+      oldValueDisplay: this.formatDisplayValue(oldValue),
+      newValueDisplay: this.formatDisplayValue(newValue),
+      source, operation, reason, sourceMetadata,
+      changeType: this.determineChangeType(oldValue, newValue),
+    };
+
+    this.history.push(entry);
+    this.updateRecordProvenance(recordId, recordIdentifier, tableName, entry);
+    if (this.history.length > this.maxHistorySize) this.history = this.history.slice(-this.maxHistorySize);
+    this.saveToLocalStorage();
+    return entry;
+  }
+
+  recordBatchChanges(recordId, recordIdentifier, tableName, changes, source, operation = 'MERGE', sourceMetadata = {}) {
+    const entries = [];
+    for (const [fieldName, { oldValue, newValue, reason }] of Object.entries(changes)) {
+      const entry = this.recordChange({ recordId, recordIdentifier, tableName, fieldName, oldValue, newValue, source, operation, reason: reason || '', sourceMetadata });
+      if (entry) entries.push(entry);
+    }
+    return entries;
+  }
+
+  updateRecordProvenance(recordId, recordIdentifier, tableName, latestChange) {
+    if (!this.recordProvenance[recordId]) {
+      this.recordProvenance[recordId] = {
+        recordId, recordIdentifier, tableName,
+        createdAt: latestChange.timestamp, createdSource: latestChange.source,
+        lastModifiedAt: latestChange.timestamp, lastModifiedSource: latestChange.source,
+        changeCount: 1, fieldChangeHistory: {}, sources: [latestChange.source]
+      };
+    } else {
+      const prov = this.recordProvenance[recordId];
+      prov.lastModifiedAt = latestChange.timestamp;
+      prov.lastModifiedSource = latestChange.source;
+      prov.changeCount++;
+      if (!prov.sources.includes(latestChange.source)) prov.sources.push(latestChange.source);
+    }
+
+    const prov = this.recordProvenance[recordId];
+    if (!prov.fieldChangeHistory[latestChange.fieldName]) {
+      prov.fieldChangeHistory[latestChange.fieldName] = { changeCount: 0, lastModifiedAt: null, lastModifiedSource: null, valueHistory: [] };
+    }
+    const fieldHist = prov.fieldChangeHistory[latestChange.fieldName];
+    fieldHist.changeCount++;
+    fieldHist.lastModifiedAt = latestChange.timestamp;
+    fieldHist.lastModifiedSource = latestChange.source;
+    fieldHist.valueHistory.push({ value: latestChange.newValueDisplay, timestamp: latestChange.timestamp, source: latestChange.source });
+    if (fieldHist.valueHistory.length > 10) fieldHist.valueHistory = fieldHist.valueHistory.slice(-10);
+  }
+
+  getRecordHistory(recordId) { return this.history.filter(e => e.recordId === recordId); }
+  getFieldHistory(fieldName, tableName = null) { return this.history.filter(e => e.fieldName === fieldName && (tableName === null || e.tableName === tableName)); }
+  getRecordProvenance(recordId) { return this.recordProvenance[recordId] || null; }
+
+  getAllHistory(filters = {}) {
+    let result = [...this.history];
+    if (filters.tableName) result = result.filter(e => e.tableName === filters.tableName);
+    if (filters.source) result = result.filter(e => e.source === filters.source);
+    if (filters.operation) result = result.filter(e => e.operation === filters.operation);
+    if (filters.fieldName) result = result.filter(e => e.fieldName === filters.fieldName);
+    return result;
+  }
+
+  getStats() {
+    const stats = { totalChanges: this.history.length, recordsAffected: Object.keys(this.recordProvenance).length, changesByTable: {}, changesBySource: {}, changesByOperation: {}, changesByField: {}, recentChanges: this.history.slice(-10).reverse() };
+    for (const entry of this.history) {
+      stats.changesByTable[entry.tableName] = (stats.changesByTable[entry.tableName] || 0) + 1;
+      stats.changesBySource[entry.source] = (stats.changesBySource[entry.source] || 0) + 1;
+      stats.changesByOperation[entry.operation] = (stats.changesByOperation[entry.operation] || 0) + 1;
+      stats.changesByField[`${entry.tableName}.${entry.fieldName}`] = (stats.changesByField[`${entry.tableName}.${entry.fieldName}`] || 0) + 1;
+    }
+    return stats;
+  }
+
+  exportToJSON() { return JSON.stringify({ exportedAt: new Date().toISOString(), sessionId: this.sessionId, stats: this.getStats(), history: this.history, recordProvenance: this.recordProvenance }, null, 2); }
+
+  exportToCSV() {
+    const headers = ['Timestamp', 'Session ID', 'Record ID', 'Record Identifier', 'Table', 'Field', 'Old Value', 'New Value', 'Source', 'Operation', 'Change Type', 'Reason'];
+    const rows = this.history.map(e => [e.timestamp, e.sessionId, e.recordId, e.recordIdentifier, e.tableName, e.fieldName, e.oldValueDisplay, e.newValueDisplay, e.source, e.operation, e.changeType, e.reason]);
+    const escapeCSV = (val) => { if (val === null || val === undefined) return ''; const str = String(val); return (str.includes(',') || str.includes('"') || str.includes('\n')) ? `"${str.replace(/"/g, '""')}"` : str; };
+    return [headers.join(','), ...rows.map(row => row.map(escapeCSV).join(','))].join('\n');
+  }
+
+  clearHistory() { this.history = []; this.recordProvenance = {}; this.sessionId = this.generateSessionId(); this.saveToLocalStorage(); }
+
+  saveToLocalStorage() {
+    try { localStorage.setItem('field_history_data', JSON.stringify({ history: this.history, recordProvenance: this.recordProvenance })); }
+    catch (e) { if (e.name === 'QuotaExceededError') { this.history = this.history.slice(-10000); try { localStorage.setItem('field_history_data', JSON.stringify({ history: this.history, recordProvenance: this.recordProvenance })); } catch (e2) {} } }
+  }
+
+  valuesEqual(a, b) {
+    if (a === b) return true;
+    if (a === null || a === undefined || a === '') return b === null || b === undefined || b === '';
+    if (Array.isArray(a) && Array.isArray(b)) return JSON.stringify(a) === JSON.stringify(b);
+    if (typeof a === 'object' && typeof b === 'object') return JSON.stringify(a) === JSON.stringify(b);
+    return String(a) === String(b);
+  }
+
+  serializeValue(val) { if (val === null || val === undefined) return null; if (typeof val === 'object') return JSON.stringify(val); return val; }
+
+  formatDisplayValue(val) {
+    if (val === null || val === undefined || val === '') return '(empty)';
+    if (Array.isArray(val)) return val.length > 3 ? `[${val.slice(0, 3).join(', ')}... +${val.length - 3} more]` : `[${val.join(', ')}]`;
+    if (typeof val === 'object') { const str = JSON.stringify(val); return str.length > 100 ? str.substring(0, 100) + '...' : str; }
+    const str = String(val); return str.length > 200 ? str.substring(0, 200) + '...' : str;
+  }
+
+  determineChangeType(oldVal, newVal) {
+    const oldEmpty = oldVal === null || oldVal === undefined || oldVal === '' || (Array.isArray(oldVal) && oldVal.length === 0);
+    const newEmpty = newVal === null || newVal === undefined || newVal === '' || (Array.isArray(newVal) && newVal.length === 0);
+    if (oldEmpty && !newEmpty) return 'POPULATED';
+    if (!oldEmpty && newEmpty) return 'CLEARED';
+    if (!oldEmpty && !newEmpty) return 'MODIFIED';
+    return 'NO_CHANGE';
+  }
+}
+
+const fieldHistoryManager = new FieldHistoryManager();
+
 // State-machine CSV Parser - handles multiline quoted fields correctly
 // Auto-detects delimiter (tab or comma)
 const parseCSV = (text) => {
@@ -855,6 +1015,37 @@ function ClioAirtableMerger() {
     source: 'clio-merge',
   });
   const [caseNoteResult, setCaseNoteResult] = useState(null);
+
+  // Field History & Audit Trail State
+  const [auditFilters, setAuditFilters] = useState({ tableName: '', source: '', operation: '', fieldName: '', searchQuery: '' });
+  const [auditStats, setAuditStats] = useState(() => fieldHistoryManager.getStats());
+
+  const refreshAuditStats = useCallback(() => setAuditStats(fieldHistoryManager.getStats()), []);
+
+  const exportAuditJSON = useCallback(() => {
+    const blob = new Blob([fieldHistoryManager.exportToJSON()], { type: 'application/json' });
+    const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
+    a.download = `audit-log-${new Date().toISOString().split('T')[0]}.json`; a.click();
+  }, []);
+
+  const exportAuditCSV = useCallback(() => {
+    const blob = new Blob([fieldHistoryManager.exportToCSV()], { type: 'text/csv' });
+    const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
+    a.download = `audit-log-${new Date().toISOString().split('T')[0]}.csv`; a.click();
+  }, []);
+
+  const clearAuditHistory = useCallback(() => {
+    if (window.confirm('Clear all audit history? This cannot be undone.')) { fieldHistoryManager.clearHistory(); refreshAuditStats(); }
+  }, [refreshAuditStats]);
+
+  const getFilteredHistory = useCallback(() => {
+    let history = fieldHistoryManager.getAllHistory(auditFilters);
+    if (auditFilters.searchQuery) {
+      const q = auditFilters.searchQuery.toLowerCase();
+      history = history.filter(e => e.recordIdentifier?.toLowerCase().includes(q) || e.fieldName?.toLowerCase().includes(q) || e.oldValueDisplay?.toLowerCase().includes(q) || e.newValueDisplay?.toLowerCase().includes(q));
+    }
+    return history.slice(-100).reverse();
+  }, [auditFilters]);
 
   // API Sync State
   const [syncState, setSyncState] = useState({
@@ -3144,126 +3335,92 @@ function ClioAirtableMerger() {
     };
 
     // Helper function to merge fields from new record into existing record
+    // Also captures field history for provenance tracking
     const computeMergedFields = (newRecord, existingRecord) => {
       const mergedFields = {};
+      const fieldChanges = {}; // Track old -> new for history
       let fieldsToUpdate = 0;
 
-      // Process each mappable field from our new record
+      const recordFieldChange = (field, oldVal, newVal, reason) => {
+        mergedFields[field] = newVal;
+        fieldChanges[field] = { oldValue: oldVal, newValue: newVal, reason };
+        fieldsToUpdate++;
+      };
+
       Object.entries(ourFieldToAirtable).forEach(([ourField, airtableField]) => {
         const newValue = newRecord[ourField];
         const existingValue = existingRecord.fields[airtableField];
-
-        // Skip if no new value
         if (newValue === undefined || newValue === null || newValue === '') return;
 
-        // Special handling for link fields (Edit Client Info)
         if (ourField === 'Airtable_Record_ID') {
-          // Link fields are arrays in Airtable
           const newLinkValue = [newValue];
           const existingLinks = existingValue || [];
-
-          // Only update if new value differs or existing is empty
-          if (!existingLinks.length || (existingLinks.length > 0 && existingLinks[0] !== newValue)) {
-            mergedFields[airtableField] = newLinkValue;
-            fieldsToUpdate++;
+          if (!existingLinks.length || existingLinks[0] !== newValue) {
+            recordFieldChange(airtableField, existingLinks, newLinkValue, 'Client link updated');
           }
           return;
         }
 
-        // Special handling for Case Notes - merge intelligently
         if (ourField === 'Notes') {
           if (!existingValue || existingValue.trim() === '') {
-            // Existing is empty, use new
-            mergedFields[airtableField] = newValue;
-            fieldsToUpdate++;
+            recordFieldChange(airtableField, existingValue, newValue, 'Case notes populated');
           } else if (newValue && newValue.trim() !== '' && newValue !== existingValue) {
-            // Both have values - merge by appending new notes if different
-            // Check if new notes contain content not in existing
             const existingNotes = existingValue.trim();
             const newNotes = newValue.trim();
-
-            // Simple merge: if lengths are significantly different, the longer one wins
-            // Or if new notes seem more complete, use them
             if (newNotes.length > existingNotes.length * 1.1) {
-              mergedFields[airtableField] = newNotes;
-              fieldsToUpdate++;
+              recordFieldChange(airtableField, existingNotes, newNotes, 'Case notes updated - more complete');
             }
           }
           return;
         }
 
-        // Special handling for Matter_Flatpack - prefer new value as it's more current
         if (ourField === 'Matter_Flatpack') {
           if (!existingValue || existingValue === '{}' || existingValue === '') {
-            mergedFields[airtableField] = newValue;
-            fieldsToUpdate++;
+            recordFieldChange(airtableField, existingValue, newValue, 'Flatpack data populated');
           } else {
-            // Try to merge JSON data
             try {
               const existingData = JSON.parse(existingValue);
               const newData = JSON.parse(newValue);
-              // Prefer new data but keep existing if new is empty
               if (Object.keys(newData).length > Object.keys(existingData).length) {
-                mergedFields[airtableField] = newValue;
-                fieldsToUpdate++;
+                recordFieldChange(airtableField, existingValue, newValue, 'Flatpack updated - more keys');
               }
             } catch (e) {
-              // If parse fails, use new value if existing is empty
-              if (!existingValue) {
-                mergedFields[airtableField] = newValue;
-                fieldsToUpdate++;
-              }
+              if (!existingValue) recordFieldChange(airtableField, existingValue, newValue, 'Flatpack data set');
             }
           }
           return;
         }
 
-        // For all other fields: fill in empty values, or update if different
         if (!existingValue || existingValue === '') {
-          mergedFields[airtableField] = newValue;
-          fieldsToUpdate++;
+          recordFieldChange(airtableField, existingValue, newValue, `Field populated (${ourField})`);
         }
       });
 
-      // Also process schema-mapped fields from phase2FieldMapping
       Object.entries(phase2FieldMapping.outputFields).forEach(([fieldId, config]) => {
         if (!config.enabled) return;
-
         const newValue = newRecord[fieldId] || newRecord[config.fieldName];
         const existingValue = existingRecord.fields[config.fieldName];
-
-        // Skip if no new value
         if (newValue === undefined || newValue === null || newValue === '') return;
-
-        // Skip if already handled above
         if (Object.values(ourFieldToAirtable).includes(config.fieldName)) return;
-
-        // Skip computed fields
         const computedTypes = ['formula', 'rollup', 'lookup', 'count', 'autoNumber', 'createdTime', 'lastModifiedTime', 'createdBy', 'lastModifiedBy'];
         if (computedTypes.includes(config.fieldType)) return;
 
-        // Handle based on field type
         if (config.fieldType === 'multipleRecordLinks') {
           const newLinks = Array.isArray(newValue) ? newValue : (newValue ? [newValue] : []);
           const existingLinks = existingValue || [];
           if (newLinks.length > 0 && (!existingLinks.length || newLinks[0] !== existingLinks[0])) {
-            mergedFields[config.fieldName] = newLinks;
-            fieldsToUpdate++;
+            recordFieldChange(config.fieldName, existingLinks, newLinks, 'Link field updated');
           }
         } else if (config.fieldType === 'checkbox') {
-          // Only update checkbox if currently false/empty
           if (!existingValue && newValue) {
-            mergedFields[config.fieldName] = Boolean(newValue);
-            fieldsToUpdate++;
+            recordFieldChange(config.fieldName, existingValue, Boolean(newValue), 'Checkbox set');
           }
         } else if (!existingValue || existingValue === '') {
-          // Fill in empty values for text, number, etc.
-          mergedFields[config.fieldName] = newValue;
-          fieldsToUpdate++;
+          recordFieldChange(config.fieldName, existingValue, newValue, `Field populated (${config.fieldType})`);
         }
       });
 
-      return { mergedFields, fieldsToUpdate };
+      return { mergedFields, fieldsToUpdate, fieldChanges };
     };
 
     const preview = { new: [], existing: [], errors: [] };
@@ -3286,8 +3443,8 @@ function ClioAirtableMerger() {
       const existingRecord = clioMatterIdLookup.get(normalizedMatterId);
 
       if (existingRecord) {
-        // Compute what fields would be merged
-        const { mergedFields, fieldsToUpdate } = computeMergedFields(record, existingRecord);
+        // Compute what fields would be merged (also returns fieldChanges for history)
+        const { mergedFields, fieldsToUpdate, fieldChanges } = computeMergedFields(record, existingRecord);
         totalFieldsToMerge += fieldsToUpdate;
 
         preview.existing.push({
@@ -3296,8 +3453,9 @@ function ClioAirtableMerger() {
           existingRecord,
           matchedField: 'clio_matter_id',
           matchedValue: matterId,
-          mergedFields, // Fields that will be updated
-          fieldsToUpdate // Count of fields to update
+          mergedFields,
+          fieldsToUpdate,
+          fieldChanges // Field change history with old/new values
         });
       } else {
         preview.new.push({
@@ -3394,6 +3552,21 @@ function ClioAirtableMerger() {
         updated += result.records.length;
         addPhase2Log(`Merge batch ${Math.floor(i/10) + 1}: Updated ${result.records.length} records`, 'success');
 
+        // Record field history for provenance tracking
+        batch.forEach((item) => {
+          if (item.fieldChanges && Object.keys(item.fieldChanges).length > 0) {
+            fieldHistoryManager.recordBatchChanges(
+              item.existingRecord.id,
+              item.matchedValue || item.existingRecord.fields['clio_matter_id'],
+              'Case Master View',
+              item.fieldChanges,
+              'Phase 2 Merge',
+              'MERGE',
+              { sourceIndex: item.sourceIndex, testMode }
+            );
+          }
+        });
+
         setPhase2Sync(prev => ({
           ...prev,
           progress: { ...prev.progress, current: i + batch.length }
@@ -3405,6 +3578,12 @@ function ClioAirtableMerger() {
 
       // Rate limiting: 250ms between batches (Airtable allows 5 req/sec)
       await new Promise(resolve => setTimeout(resolve, 250));
+    }
+
+    // Log history stats
+    const historyStats = fieldHistoryManager.getStats();
+    if (historyStats.totalChanges > 0) {
+      addPhase2Log(`Field history: ${historyStats.totalChanges} changes tracked`, 'info');
     }
 
     setPhase2Sync(prev => ({
@@ -4787,13 +4966,17 @@ function ClioAirtableMerger() {
             { num: 3, label: 'Phase 3: Events & Relationships', desc: 'Events + Related Contacts' },
             { num: 4, label: 'Phase 4: Case Notes', desc: 'Notes → Xano' },
             { num: 5, label: 'Dev Tools', desc: 'Schema & Record Lookup' },
-          ].map(({ num, label, desc }) => (
+            { num: 6, label: 'Audit Log', desc: 'Field History & Provenance', badge: auditStats.totalChanges || null },
+          ].map(({ num, label, desc, badge }) => (
             <div
               key={num}
               className={`phase-tab ${activePhase === num ? 'active' : ''}`}
-              onClick={() => setActivePhase(num)}
+              onClick={() => { setActivePhase(num); if (num === 6) refreshAuditStats(); }}
             >
-              <div style={{ fontWeight: 600 }}>{label}</div>
+              <div style={{ fontWeight: 600, display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                {label}
+                {badge && <span style={{ background: '#22c55e', color: 'white', fontSize: '0.65rem', padding: '0.1rem 0.4rem', borderRadius: '9999px' }}>{badge}</span>}
+              </div>
               <div style={{ fontSize: '0.75rem', color: '#71717a' }}>{desc}</div>
             </div>
           ))}
@@ -7246,6 +7429,105 @@ function ClioAirtableMerger() {
                       </div>
                     </div>
                   ))}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Phase 6: Audit Log */}
+          {activePhase === 6 && (
+            <div>
+              <h2 style={{ marginBottom: '1rem', fontSize: '1.25rem', display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                Field History & Provenance
+                <span style={{ background: '#22c55e', color: 'white', fontSize: '0.75rem', padding: '0.25rem 0.75rem', borderRadius: '9999px' }}>{auditStats.totalChanges} changes</span>
+              </h2>
+              <p style={{ color: '#71717a', marginBottom: '1.5rem', fontSize: '0.875rem' }}>
+                Complete audit trail of all field changes. Track when fields were modified, old/new values, and source of each change.
+              </p>
+
+              {/* Stats */}
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '1rem', marginBottom: '1.5rem' }}>
+                <div style={{ background: 'rgba(99, 102, 241, 0.1)', border: '1px solid rgba(99, 102, 241, 0.3)', borderRadius: '8px', padding: '1rem', textAlign: 'center' }}>
+                  <div style={{ fontSize: '2rem', fontWeight: 700, color: '#818cf8' }}>{auditStats.totalChanges}</div>
+                  <div style={{ fontSize: '0.75rem', color: '#a1a1aa' }}>Total Changes</div>
+                </div>
+                <div style={{ background: 'rgba(168, 85, 247, 0.1)', border: '1px solid rgba(168, 85, 247, 0.3)', borderRadius: '8px', padding: '1rem', textAlign: 'center' }}>
+                  <div style={{ fontSize: '2rem', fontWeight: 700, color: '#a78bfa' }}>{auditStats.recordsAffected}</div>
+                  <div style={{ fontSize: '0.75rem', color: '#a1a1aa' }}>Records Modified</div>
+                </div>
+                <div style={{ background: 'rgba(236, 72, 153, 0.1)', border: '1px solid rgba(236, 72, 153, 0.3)', borderRadius: '8px', padding: '1rem', textAlign: 'center' }}>
+                  <div style={{ fontSize: '2rem', fontWeight: 700, color: '#f472b6' }}>{Object.keys(auditStats.changesByTable || {}).length}</div>
+                  <div style={{ fontSize: '0.75rem', color: '#a1a1aa' }}>Tables</div>
+                </div>
+                <div style={{ background: 'rgba(34, 197, 94, 0.1)', border: '1px solid rgba(34, 197, 94, 0.3)', borderRadius: '8px', padding: '1rem', textAlign: 'center' }}>
+                  <div style={{ fontSize: '2rem', fontWeight: 700, color: '#4ade80' }}>{Object.keys(auditStats.changesBySource || {}).length}</div>
+                  <div style={{ fontSize: '0.75rem', color: '#a1a1aa' }}>Sources</div>
+                </div>
+              </div>
+
+              {/* Actions */}
+              <div style={{ display: 'flex', gap: '0.75rem', marginBottom: '1.5rem' }}>
+                <button className="btn btn-primary" onClick={exportAuditJSON} disabled={!auditStats.totalChanges}>Export JSON</button>
+                <button className="btn btn-primary" onClick={exportAuditCSV} disabled={!auditStats.totalChanges} style={{ background: 'linear-gradient(135deg, #a855f7 0%, #c084fc 100%)' }}>Export CSV</button>
+                <button className="btn btn-primary" onClick={refreshAuditStats} style={{ background: 'linear-gradient(135deg, #22c55e 0%, #16a34a 100%)' }}>Refresh</button>
+                <button className="btn btn-primary" onClick={clearAuditHistory} disabled={!auditStats.totalChanges} style={{ background: 'linear-gradient(135deg, #ef4444 0%, #dc2626 100%)' }}>Clear</button>
+              </div>
+
+              {/* Filters */}
+              <div style={{ background: 'rgba(0, 0, 0, 0.2)', borderRadius: '8px', padding: '1rem', marginBottom: '1.5rem' }}>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '0.75rem' }}>
+                  <input type="text" placeholder="Search..." value={auditFilters.searchQuery} onChange={(e) => setAuditFilters(prev => ({ ...prev, searchQuery: e.target.value }))} style={{ padding: '0.5rem', borderRadius: '4px', border: '1px solid rgba(255,255,255,0.15)', background: 'rgba(0,0,0,0.3)', color: '#e4e4e7', fontSize: '0.8rem' }} />
+                  <select value={auditFilters.tableName} onChange={(e) => setAuditFilters(prev => ({ ...prev, tableName: e.target.value }))} style={{ padding: '0.5rem', borderRadius: '4px', border: '1px solid rgba(255,255,255,0.15)', background: 'rgba(0,0,0,0.3)', color: '#e4e4e7', fontSize: '0.8rem' }}>
+                    <option value="">All Tables</option>
+                    {Object.keys(auditStats.changesByTable || {}).map(t => <option key={t} value={t}>{t}</option>)}
+                  </select>
+                  <select value={auditFilters.source} onChange={(e) => setAuditFilters(prev => ({ ...prev, source: e.target.value }))} style={{ padding: '0.5rem', borderRadius: '4px', border: '1px solid rgba(255,255,255,0.15)', background: 'rgba(0,0,0,0.3)', color: '#e4e4e7', fontSize: '0.8rem' }}>
+                    <option value="">All Sources</option>
+                    {Object.keys(auditStats.changesBySource || {}).map(s => <option key={s} value={s}>{s}</option>)}
+                  </select>
+                  <button onClick={() => setAuditFilters({ tableName: '', source: '', operation: '', fieldName: '', searchQuery: '' })} style={{ padding: '0.5rem', borderRadius: '4px', background: 'rgba(255,255,255,0.1)', color: '#a1a1aa', border: 'none', cursor: 'pointer' }}>Clear Filters</button>
+                </div>
+              </div>
+
+              {/* History Table */}
+              <div style={{ background: 'rgba(0, 0, 0, 0.2)', borderRadius: '8px', overflow: 'hidden' }}>
+                <div style={{ padding: '0.75rem 1rem', borderBottom: '1px solid rgba(255,255,255,0.1)', display: 'flex', justifyContent: 'space-between' }}>
+                  <span style={{ color: '#a5b4fc', fontWeight: 600 }}>Change History</span>
+                  <span style={{ color: '#71717a', fontSize: '0.75rem' }}>{getFilteredHistory().length} entries</span>
+                </div>
+                <div style={{ maxHeight: '400px', overflowY: 'auto' }}>
+                  {getFilteredHistory().length === 0 ? (
+                    <div style={{ padding: '2rem', textAlign: 'center', color: '#71717a' }}>No changes recorded yet</div>
+                  ) : (
+                    <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.75rem' }}>
+                      <thead style={{ background: 'rgba(0,0,0,0.3)', position: 'sticky', top: 0 }}>
+                        <tr>
+                          <th style={{ padding: '0.5rem', textAlign: 'left', color: '#a1a1aa' }}>Time</th>
+                          <th style={{ padding: '0.5rem', textAlign: 'left', color: '#a1a1aa' }}>Record</th>
+                          <th style={{ padding: '0.5rem', textAlign: 'left', color: '#a1a1aa' }}>Field</th>
+                          <th style={{ padding: '0.5rem', textAlign: 'left', color: '#a1a1aa' }}>Old</th>
+                          <th style={{ padding: '0.5rem', textAlign: 'left', color: '#a1a1aa' }}>New</th>
+                          <th style={{ padding: '0.5rem', textAlign: 'left', color: '#a1a1aa' }}>Source</th>
+                          <th style={{ padding: '0.5rem', textAlign: 'left', color: '#a1a1aa' }}>Type</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {getFilteredHistory().map((entry, idx) => (
+                          <tr key={entry.id || idx} style={{ borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
+                            <td style={{ padding: '0.5rem', color: '#71717a' }}>{new Date(entry.timestamp).toLocaleString()}</td>
+                            <td style={{ padding: '0.5rem', color: '#818cf8' }}>{entry.recordIdentifier || entry.recordId?.slice(0, 10)}</td>
+                            <td style={{ padding: '0.5rem', color: '#c4b5fd' }}>{entry.fieldName}</td>
+                            <td style={{ padding: '0.5rem', color: '#f87171', maxWidth: '120px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={entry.oldValueDisplay}>{entry.oldValueDisplay}</td>
+                            <td style={{ padding: '0.5rem', color: '#4ade80', maxWidth: '120px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={entry.newValueDisplay}>{entry.newValueDisplay}</td>
+                            <td style={{ padding: '0.5rem', color: '#a1a1aa' }}>{entry.source}</td>
+                            <td style={{ padding: '0.5rem' }}>
+                              <span style={{ padding: '0.1rem 0.4rem', borderRadius: '4px', fontSize: '0.65rem', fontWeight: 600, background: entry.changeType === 'POPULATED' ? 'rgba(34,197,94,0.2)' : entry.changeType === 'MODIFIED' ? 'rgba(99,102,241,0.2)' : 'rgba(239,68,68,0.2)', color: entry.changeType === 'POPULATED' ? '#4ade80' : entry.changeType === 'MODIFIED' ? '#818cf8' : '#f87171' }}>{entry.changeType}</span>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  )}
                 </div>
               </div>
             </div>
