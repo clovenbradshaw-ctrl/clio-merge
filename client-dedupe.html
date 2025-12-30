@@ -415,6 +415,9 @@ class AirtableClient {
 // Fields to EXCLUDE from merging (Box fields need manual cleanup)
 const BOX_FIELDS = ['Box_Folder_ID', 'box_shared_link', 'Box Legacy ID'];
 
+// Name fields that require special merge logic
+const NAME_FIELDS = ['First Name', 'Middle Name', 'Family Name'];
+
 // Compute merged fields dynamically using schema
 const computeMergedFields = (keepRecord, deleteRecords, schema) => {
   const mergedFields = {};
@@ -446,8 +449,20 @@ const computeMergedFields = (keepRecord, deleteRecords, schema) => {
     }
   });
 
+  // SMART NAME MERGE: Handle name fields with intelligent logic
+  // Prefers records with structured names (First + Family) over those with just Family Name
+  // Auto-parses full names into components using Latino naming conventions
+  const nameFieldUpdates = mergeNameFields(keepRecord, deleteRecords, mergeLog);
+  Object.assign(mergedFields, nameFieldUpdates);
+
   // Merge text fields (prefer non-empty values, keep record takes priority)
+  // EXCLUDE name fields - they're handled by mergeNameFields above
   textFields.forEach(field => {
+    // Skip name fields - handled specially above
+    if (NAME_FIELDS.includes(field)) {
+      return;
+    }
+
     const keepValue = keepFields[field];
 
     // If keep record already has a value, don't overwrite
@@ -539,6 +554,212 @@ const normalizeName = (name) => {
     // Remove extra whitespace
     .replace(/\s+/g, ' ')
     .trim();
+};
+
+// ============================================
+// SMART NAME PARSING (Latino naming conventions)
+// ============================================
+
+/**
+ * Parse a full name string into First Name, Middle Name, and Family Name
+ * Following Latino naming conventions:
+ * - If 2 words: First + Family (e.g., "Juan Garcia" -> First: Juan, Family: Garcia)
+ * - If 3 words: First + two last names in Family (e.g., "Juan Garcia Lopez" -> First: Juan, Family: Garcia Lopez)
+ * - If 4+ words: First + Middle + remaining as Family (e.g., "Juan Carlos Garcia Lopez" -> First: Juan, Middle: Carlos, Family: Garcia Lopez)
+ */
+const parseFullName = (fullName) => {
+  if (!fullName || typeof fullName !== 'string') {
+    return { firstName: '', middleName: '', familyName: '' };
+  }
+
+  const trimmed = fullName.trim();
+
+  // Handle "LASTNAME, FIRSTNAME" format (common in legal/court documents)
+  if (trimmed.includes(',')) {
+    const parts = trimmed.split(',').map(p => p.trim());
+    if (parts.length >= 2) {
+      const familyName = parts[0];
+      const givenParts = parts[1].split(' ').filter(p => p.length > 0);
+      if (givenParts.length >= 2) {
+        return {
+          firstName: givenParts[0],
+          middleName: givenParts.slice(1).join(' '),
+          familyName: familyName
+        };
+      }
+      return {
+        firstName: parts[1],
+        middleName: '',
+        familyName: familyName
+      };
+    }
+  }
+
+  // Split into words
+  const words = trimmed.split(' ').filter(w => w.length > 0);
+
+  if (words.length === 0) {
+    return { firstName: '', middleName: '', familyName: '' };
+  }
+
+  if (words.length === 1) {
+    // Single word - treat as family name (most common for partial data)
+    return { firstName: '', middleName: '', familyName: words[0] };
+  }
+
+  if (words.length === 2) {
+    // Two words: First + Family
+    return { firstName: words[0], middleName: '', familyName: words[1] };
+  }
+
+  if (words.length === 3) {
+    // Three words: First + two Family names (Latino convention)
+    // e.g., "Abdulio Guerrero Tobar" -> First: Abdulio, Family: Guerrero Tobar
+    return { firstName: words[0], middleName: '', familyName: words.slice(1).join(' ') };
+  }
+
+  // 4+ words: First + Middle + remaining as Family
+  // e.g., "Abdulio Mauricio Guerrero Tobar" -> First: Abdulio, Middle: Mauricio, Family: Guerrero Tobar
+  return {
+    firstName: words[0],
+    middleName: words[1],
+    familyName: words.slice(2).join(' ')
+  };
+};
+
+/**
+ * Check if a record has structured name data (both First Name AND Family Name populated)
+ */
+const hasStructuredName = (record) => {
+  const fields = record.fields || record.record?.fields || {};
+  const firstName = (fields['First Name'] || '').trim();
+  const familyName = (fields['Family Name'] || '').trim();
+  return firstName.length > 0 && familyName.length > 0;
+};
+
+/**
+ * Get a full name string from any available name field
+ */
+const getFullNameFromRecord = (record) => {
+  const fields = record.fields || record.record?.fields || {};
+
+  // Try structured fields first
+  const firstName = (fields['First Name'] || '').trim();
+  const middleName = (fields['Middle Name'] || '').trim();
+  const familyName = (fields['Family Name'] || '').trim();
+
+  if (firstName || familyName) {
+    return [firstName, middleName, familyName].filter(Boolean).join(' ');
+  }
+
+  // Fall back to computed/imported name fields
+  return (fields['Full_Name_Normal_Pretty'] ||
+          fields['Client Name'] ||
+          fields['Imported table 9'] ||  // Common import field
+          '').trim();
+};
+
+/**
+ * Merge name fields intelligently:
+ * 1. If one record has structured names (First + Family) and the other doesn't, use the structured one
+ * 2. If both have structured names, prefer the one with more complete data (including middle name)
+ * 3. If neither has structured names, parse the full name and suggest the split
+ */
+const mergeNameFields = (keepRecord, deleteRecords, mergeLog) => {
+  const nameFields = {};
+  const keepFields = keepRecord.record.fields || {};
+  const allRecords = [keepRecord, ...deleteRecords];
+
+  // Check which records have structured names
+  const recordsWithStructuredNames = allRecords.filter(r => hasStructuredName(r.record || r));
+
+  // Find the best record for name data
+  let bestNameRecord = null;
+
+  if (recordsWithStructuredNames.length > 0) {
+    // Prefer records with structured names
+    // Among those, prefer ones with middle name filled
+    bestNameRecord = recordsWithStructuredNames.reduce((best, current) => {
+      const currentFields = current.record?.fields || current.fields || {};
+      const bestFields = best?.record?.fields || best?.fields || {};
+
+      const currentMiddle = (currentFields['Middle Name'] || '').trim();
+      const bestMiddle = (bestFields['Middle Name'] || '').trim();
+
+      // Prefer the one with middle name
+      if (currentMiddle && !bestMiddle) return current;
+      if (!currentMiddle && bestMiddle) return best;
+
+      // If tied, keep the current best (which is the keep record if it has structured names)
+      return best || current;
+    }, null);
+  }
+
+  // Get the fields from the best record
+  const bestFields = bestNameRecord?.record?.fields || bestNameRecord?.fields || {};
+  const bestFirstName = (bestFields['First Name'] || '').trim();
+  const bestMiddleName = (bestFields['Middle Name'] || '').trim();
+  const bestFamilyName = (bestFields['Family Name'] || '').trim();
+
+  // Current keep record values
+  const keepFirstName = (keepFields['First Name'] || '').trim();
+  const keepMiddleName = (keepFields['Middle Name'] || '').trim();
+  const keepFamilyName = (keepFields['Family Name'] || '').trim();
+
+  // Case 1: Best record has structured names and is different from keep record
+  if (bestNameRecord && hasStructuredName(bestNameRecord.record || bestNameRecord)) {
+    // Update First Name if keep doesn't have it or best is better
+    if (!keepFirstName && bestFirstName) {
+      nameFields['First Name'] = bestFirstName;
+      mergeLog.push(`First Name: filled from record with structured name`);
+    }
+
+    // Update Middle Name if keep doesn't have it and best does
+    if (!keepMiddleName && bestMiddleName) {
+      nameFields['Middle Name'] = bestMiddleName;
+      mergeLog.push(`Middle Name: filled from record with structured name`);
+    }
+
+    // Update Family Name if keep doesn't have it or best is better
+    if (!keepFamilyName && bestFamilyName) {
+      nameFields['Family Name'] = bestFamilyName;
+      mergeLog.push(`Family Name: filled from record with structured name`);
+    }
+  }
+
+  // Case 2: Neither has structured names - try to parse from a full name field
+  if (!hasStructuredName(keepRecord.record) && recordsWithStructuredNames.length === 0) {
+    // Look for a full name to parse from any record
+    let fullNameToParse = '';
+    for (const r of allRecords) {
+      const name = getFullNameFromRecord(r.record || r);
+      if (name && name.split(' ').length >= 2) {
+        fullNameToParse = name;
+        break;
+      }
+    }
+
+    if (fullNameToParse) {
+      const parsed = parseFullName(fullNameToParse);
+
+      if (!keepFirstName && parsed.firstName) {
+        nameFields['First Name'] = parsed.firstName;
+        mergeLog.push(`First Name: auto-parsed from "${fullNameToParse}"`);
+      }
+
+      if (!keepMiddleName && parsed.middleName) {
+        nameFields['Middle Name'] = parsed.middleName;
+        mergeLog.push(`Middle Name: auto-parsed from "${fullNameToParse}"`);
+      }
+
+      if (!keepFamilyName && parsed.familyName) {
+        nameFields['Family Name'] = parsed.familyName;
+        mergeLog.push(`Family Name: auto-parsed from "${fullNameToParse}"`);
+      }
+    }
+  }
+
+  return nameFields;
 };
 
 // Build a deduplication key from First Name and Family Name fields
@@ -662,10 +883,18 @@ const scoreRecord = (record) => {
   // PPID indicates Practice Panther link
   if (fields['PPID']) score += 20;
 
-  // Name completeness
-  if (fields['First Name']) score += 5;
-  if (fields['Middle Name']) score += 3;
-  if (fields['Family Name']) score += 5;
+  // Name completeness - BONUS for properly structured names
+  const hasFirstName = fields['First Name'] && fields['First Name'].trim();
+  const hasMiddleName = fields['Middle Name'] && fields['Middle Name'].trim();
+  const hasFamilyName = fields['Family Name'] && fields['Family Name'].trim();
+
+  if (hasFirstName) score += 5;
+  if (hasMiddleName) score += 3;
+  if (hasFamilyName) score += 5;
+
+  // BONUS: Records with BOTH First AND Family Name are much more valuable
+  // (indicates properly structured name data vs just dumping everything in Family Name)
+  if (hasFirstName && hasFamilyName) score += 25;
 
   return score;
 };
