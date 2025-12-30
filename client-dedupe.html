@@ -473,24 +473,97 @@ const computeMergedFields = (keepRecord, deleteRecords, schema) => {
   return { mergedFields, mergeLog };
 };
 
-// Build merge note to append to flatpack
-const buildMergeNote = (keepRecord, deleteRecords, mergeLog) => {
-  const timestamp = new Date().toISOString();
-  const deletedIds = deleteRecords.map(dr => dr.record.id);
+// Generate short batch ID (6 chars)
+const generateBatchId = () => {
+  return Math.random().toString(36).substring(2, 8);
+};
+
+// Build delta-only merge note for dedupe_history
+// Only stores what changed, not full snapshots
+const buildDeltaMergeNote = (keepRecord, deleteRecords, mergeLog, schema, batchId) => {
+  const ts = new Date().toISOString();
+  const mergedInIds = deleteRecords.map(dr => dr.record.id);
+
+  // Build the dedupe key used for matching
+  const dedupeKey = buildDedupeKey(keepRecord.record);
+
+  // Build deltas object - only what changed
+  const deltas = {};
+
+  // Parse merge log to build structured deltas
+  mergeLog.forEach(logEntry => {
+    // Format: "Field Name: added N link(s)" or "Field Name: filled from duplicate"
+    const match = logEntry.match(/^(.+?):\s+(.+)$/);
+    if (!match) return;
+
+    const [, fieldName, action] = match;
+
+    if (action.includes('added') && action.includes('link')) {
+      // Link field - extract count of links added
+      const countMatch = action.match(/added (\d+) link/);
+      const addedCount = countMatch ? parseInt(countMatch[1]) : 0;
+
+      // Find which records contributed these links
+      const keepLinks = new Set(keepRecord.record.fields[fieldName] || []);
+      const addedLinks = [];
+      const sourceMap = {}; // link ID -> source record ID
+
+      deleteRecords.forEach(dr => {
+        const drLinks = dr.record.fields[fieldName] || [];
+        drLinks.forEach(linkId => {
+          if (!keepLinks.has(linkId)) {
+            addedLinks.push(linkId);
+            sourceMap[linkId] = dr.record.id;
+          }
+        });
+      });
+
+      deltas[fieldName] = {
+        '+': addedLinks,
+        '←': sourceMap  // Which record each link came from
+      };
+    } else if (action.includes('filled from duplicate')) {
+      // Text field - find which duplicate provided the value
+      for (const dr of deleteRecords) {
+        const dupValue = dr.record.fields[fieldName];
+        if (dupValue !== undefined && dupValue !== null && String(dupValue).trim()) {
+          deltas[fieldName] = {
+            '←': dr.record.id,
+            'v': dupValue
+          };
+          break;
+        }
+      }
+    }
+  });
 
   return {
-    _merge_event: {
-      timestamp,
-      kept_record_id: keepRecord.record.id,
-      deleted_record_ids: deletedIds,
-      deleted_count: deletedIds.length,
-      fields_merged: mergeLog,
-    }
+    ts,
+    batch: batchId,
+    merged_in: mergedInIds,
+    deltas,
+    key: dedupeKey,
+    reason: 'name'  // Currently always name-based deduplication
   };
 };
 
-// Update flatpack field with merge note
-const updateFlatpackWithMergeNote = (currentFlatpack, mergeNote) => {
+// Legacy format converter - for backwards compatibility when reading old data
+const convertLegacyMergeEvent = (legacyEvent) => {
+  // Convert old _merge_history format to new dedupe_history format
+  return {
+    ts: legacyEvent.timestamp,
+    batch: 'legacy',
+    merged_in: legacyEvent.deleted_record_ids || [],
+    deltas: {}, // Can't reconstruct deltas from old format
+    key: 'unknown',
+    reason: 'name',
+    _legacy: true,
+    _legacy_fields_merged: legacyEvent.fields_merged || []
+  };
+};
+
+// Update flatpack field with delta merge note
+const updateFlatpackWithMergeNote = (currentFlatpack, deltaMergeNote) => {
   let flatpackData = {};
 
   // Parse existing flatpack if present
@@ -503,13 +576,19 @@ const updateFlatpackWithMergeNote = (currentFlatpack, mergeNote) => {
     }
   }
 
-  // Add merge history array if not present
-  if (!flatpackData._merge_history) {
-    flatpackData._merge_history = [];
+  // Migrate old _merge_history to dedupe_history if present
+  if (flatpackData._merge_history && !flatpackData.dedupe_history) {
+    flatpackData.dedupe_history = flatpackData._merge_history.map(convertLegacyMergeEvent);
+    delete flatpackData._merge_history;
   }
 
-  // Append the new merge event
-  flatpackData._merge_history.push(mergeNote._merge_event);
+  // Add dedupe_history array if not present
+  if (!flatpackData.dedupe_history) {
+    flatpackData.dedupe_history = [];
+  }
+
+  // Append the new delta merge event
+  flatpackData.dedupe_history.push(deltaMergeNote);
 
   return JSON.stringify(flatpackData);
 };
@@ -690,6 +769,12 @@ function App() {
 
   const [activeTab, setActiveTab] = useState('duplicates');
   const [showOnlyWithBox, setShowOnlyWithBox] = useState(false);
+
+  // Merge history viewer state
+  const [mergeHistory, setMergeHistory] = useState([]);
+  const [mergeHistoryLoading, setMergeHistoryLoading] = useState(false);
+  const [historyViewMode, setHistoryViewMode] = useState('timeline'); // 'timeline', 'by-client', 'by-batch'
+  const [historySearch, setHistorySearch] = useState('');
 
   const logRef = useRef(null);
 
@@ -1008,6 +1093,216 @@ function App() {
     addLog(`Exported ${ids.length} record IDs to JSON`, 'success');
   };
 
+  // ============================================
+  // MERGE HISTORY VIEWER
+  // ============================================
+
+  // Fetch merge history from all client records
+  const fetchMergeHistory = async () => {
+    if (!apiKey) {
+      addLog('Please enter your Airtable API key', 'error');
+      return;
+    }
+
+    setMergeHistoryLoading(true);
+    addLog('Fetching merge history from Airtable...', 'info');
+
+    try {
+      const client = new AirtableClient(apiKey, baseId);
+
+      // Fetch only records that have bahr_import_flatpack_data
+      const filterFormula = `AND({Bahr Client}, NOT({bahr_import_flatpack_data} = ""))`;
+      const records = await client.getAllRecords(
+        CLIENT_INFO_TABLE,
+        ['bahr_import_flatpack_data', 'First Name', 'Family Name', 'A#', 'Full_Name_Normal_Pretty', 'Client Name'],
+        filterFormula,
+        addLog
+      );
+
+      addLog(`Found ${records.length} records with flatpack data`, 'info');
+
+      // Parse and aggregate merge history from all records
+      const allMergeEvents = [];
+
+      records.forEach(record => {
+        const flatpackStr = record.fields['bahr_import_flatpack_data'];
+        if (!flatpackStr) return;
+
+        try {
+          const flatpack = JSON.parse(flatpackStr);
+
+          // Get client display name
+          const clientName = record.fields['Full_Name_Normal_Pretty'] ||
+                            record.fields['Client Name'] ||
+                            `${record.fields['First Name'] || ''} ${record.fields['Family Name'] || ''}`.trim() ||
+                            record.id;
+          const aNumber = record.fields['A#'] || '';
+
+          // Check for dedupe_history (new format)
+          if (flatpack.dedupe_history && Array.isArray(flatpack.dedupe_history)) {
+            flatpack.dedupe_history.forEach(event => {
+              allMergeEvents.push({
+                ...event,
+                _clientRecordId: record.id,
+                _clientName: clientName,
+                _aNumber: aNumber,
+              });
+            });
+          }
+
+          // Check for _merge_history (legacy format) and convert
+          if (flatpack._merge_history && Array.isArray(flatpack._merge_history)) {
+            flatpack._merge_history.forEach(legacyEvent => {
+              const converted = convertLegacyMergeEvent(legacyEvent);
+              allMergeEvents.push({
+                ...converted,
+                _clientRecordId: record.id,
+                _clientName: clientName,
+                _aNumber: aNumber,
+              });
+            });
+          }
+        } catch (e) {
+          addLog(`Failed to parse flatpack for ${record.id}: ${e.message}`, 'warning');
+        }
+      });
+
+      // Sort by timestamp descending (newest first)
+      allMergeEvents.sort((a, b) => new Date(b.ts) - new Date(a.ts));
+
+      setMergeHistory(allMergeEvents);
+      addLog(`Loaded ${allMergeEvents.length} merge events from ${records.length} records`, 'success');
+    } catch (err) {
+      addLog(`Error fetching merge history: ${err.message}`, 'error');
+    } finally {
+      setMergeHistoryLoading(false);
+    }
+  };
+
+  // Export merge history to JSON
+  const exportMergeHistoryJSON = () => {
+    if (mergeHistory.length === 0) {
+      addLog('No merge history to export', 'warning');
+      return;
+    }
+
+    // Build export object with metadata
+    const exportData = {
+      export_metadata: {
+        exported_at: new Date().toISOString(),
+        total_merge_events: mergeHistory.length,
+        unique_batches: [...new Set(mergeHistory.map(e => e.batch))].length,
+        unique_clients: [...new Set(mergeHistory.map(e => e._clientRecordId))].length,
+        total_records_merged: mergeHistory.reduce((sum, e) => sum + (e.merged_in?.length || 0), 0),
+      },
+      merge_events: mergeHistory,
+      summary_statistics: {
+        by_batch: Object.entries(
+          mergeHistory.reduce((acc, e) => {
+            acc[e.batch] = (acc[e.batch] || 0) + 1;
+            return acc;
+          }, {})
+        ).map(([batch, count]) => ({ batch, count })),
+        by_reason: Object.entries(
+          mergeHistory.reduce((acc, e) => {
+            acc[e.reason || 'unknown'] = (acc[e.reason || 'unknown'] || 0) + 1;
+            return acc;
+          }, {})
+        ).map(([reason, count]) => ({ reason, count })),
+      }
+    };
+
+    const json = JSON.stringify(exportData, null, 2);
+    const blob = new Blob([json], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `dedupe_history_export_${new Date().toISOString().split('T')[0]}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+
+    addLog(`Exported ${mergeHistory.length} merge events to JSON`, 'success');
+  };
+
+  // Format timestamp for display
+  const formatTimestamp = (ts) => {
+    try {
+      const date = new Date(ts);
+      return date.toLocaleString();
+    } catch {
+      return ts;
+    }
+  };
+
+  // Format delta for display
+  const formatDelta = (fieldName, delta) => {
+    if (!delta) return null;
+
+    if (delta['+']) {
+      // Link field with added links
+      const count = delta['+'].length;
+      return `+${count} link${count !== 1 ? 's' : ''}`;
+    } else if (delta['v']) {
+      // Text field with value
+      const value = String(delta['v']);
+      const truncated = value.length > 30 ? value.slice(0, 30) + '...' : value;
+      return `= "${truncated}"`;
+    }
+
+    return JSON.stringify(delta);
+  };
+
+  // Filter merge history based on search
+  const filteredMergeHistory = mergeHistory.filter(event => {
+    if (!historySearch) return true;
+    const search = historySearch.toLowerCase();
+    return (
+      (event._clientName && event._clientName.toLowerCase().includes(search)) ||
+      (event._aNumber && event._aNumber.includes(search)) ||
+      (event.batch && event.batch.includes(search)) ||
+      (event.key && event.key.includes(search)) ||
+      (event.merged_in && event.merged_in.some(id => id.includes(search)))
+    );
+  });
+
+  // Group merge history by batch
+  const historyByBatch = filteredMergeHistory.reduce((acc, event) => {
+    const batch = event.batch || 'unknown';
+    if (!acc[batch]) {
+      acc[batch] = {
+        batch,
+        events: [],
+        firstTs: event.ts,
+        lastTs: event.ts,
+      };
+    }
+    acc[batch].events.push(event);
+    if (new Date(event.ts) < new Date(acc[batch].firstTs)) {
+      acc[batch].firstTs = event.ts;
+    }
+    if (new Date(event.ts) > new Date(acc[batch].lastTs)) {
+      acc[batch].lastTs = event.ts;
+    }
+    return acc;
+  }, {});
+
+  // Group merge history by client
+  const historyByClient = filteredMergeHistory.reduce((acc, event) => {
+    const clientId = event._clientRecordId;
+    if (!acc[clientId]) {
+      acc[clientId] = {
+        clientId,
+        clientName: event._clientName,
+        aNumber: event._aNumber,
+        events: [],
+        totalMerged: 0,
+      };
+    }
+    acc[clientId].events.push(event);
+    acc[clientId].totalMerged += event.merged_in?.length || 0;
+    return acc;
+  }, {});
+
   // Merge and delete records from Airtable (bulk operation)
   const mergeAndDeleteRecords = async () => {
     if (duplicateGroups.length === 0) {
@@ -1038,6 +1333,10 @@ function App() {
     let mergeErrorCount = 0;
     let noChangeCount = 0;
 
+    // Generate a batch ID for this bulk operation
+    const batchId = generateBatchId();
+    addLog(`Batch ID: ${batchId}`, 'info');
+
     for (let i = 0; i < duplicateGroups.length; i++) {
       const group = duplicateGroups[i];
       const keepRecordId = group.keepRecord.record.id;
@@ -1046,12 +1345,12 @@ function App() {
       // Compute merged fields using schema
       const { mergedFields, mergeLog } = computeMergedFields(group.keepRecord, group.deleteRecords, schema);
 
-      // Build merge note for flatpack
-      const mergeNote = buildMergeNote(group.keepRecord, group.deleteRecords, mergeLog);
+      // Build delta merge note for dedupe_history
+      const deltaMergeNote = buildDeltaMergeNote(group.keepRecord, group.deleteRecords, mergeLog, schema, batchId);
 
-      // Update flatpack with merge note
+      // Update flatpack with delta merge note
       const currentFlatpack = group.keepRecord.record.fields['bahr_import_flatpack_data'];
-      const updatedFlatpack = updateFlatpackWithMergeNote(currentFlatpack, mergeNote);
+      const updatedFlatpack = updateFlatpackWithMergeNote(currentFlatpack, deltaMergeNote);
       mergedFields['bahr_import_flatpack_data'] = updatedFlatpack;
 
       if (mergeLog.length === 0) {
@@ -1190,29 +1489,34 @@ function App() {
         </div>
       )}
 
-      {/* Tabs */}
-      {duplicateGroups.length > 0 && (
-        <div className="tabs">
-          <div
-            className={`tab ${activeTab === 'duplicates' ? 'active' : ''}`}
-            onClick={() => setActiveTab('duplicates')}
-          >
-            Duplicate Groups ({filteredGroups.length})
-          </div>
-          <div
-            className={`tab ${activeTab === 'box' ? 'active' : ''}`}
-            onClick={() => setActiveTab('box')}
-          >
-            Box Folders ({boxFoldersToDelete.length})
-          </div>
-          <div
-            className={`tab ${activeTab === 'export' ? 'active' : ''}`}
-            onClick={() => setActiveTab('export')}
-          >
-            Export & Actions
-          </div>
+      {/* Tabs - Always show so Merge History is accessible */}
+      <div className="tabs">
+        <div
+          className={`tab ${activeTab === 'duplicates' ? 'active' : ''}`}
+          onClick={() => setActiveTab('duplicates')}
+        >
+          Duplicate Groups ({filteredGroups.length})
         </div>
-      )}
+        <div
+          className={`tab ${activeTab === 'box' ? 'active' : ''}`}
+          onClick={() => setActiveTab('box')}
+        >
+          Box Folders ({boxFoldersToDelete.length})
+        </div>
+        <div
+          className={`tab ${activeTab === 'export' ? 'active' : ''}`}
+          onClick={() => setActiveTab('export')}
+        >
+          Export & Actions
+        </div>
+        <div
+          className={`tab ${activeTab === 'history' ? 'active' : ''}`}
+          onClick={() => setActiveTab('history')}
+          style={{ marginLeft: 'auto', background: activeTab === 'history' ? '#334155' : '#1e293b' }}
+        >
+          Merge History {mergeHistory.length > 0 ? `(${mergeHistory.length})` : ''}
+        </div>
+      </div>
 
       {/* Duplicates Table */}
       {activeTab === 'duplicates' && duplicateGroups.length > 0 && (
@@ -1391,6 +1695,269 @@ function App() {
               Bulk Merge & Delete: {duplicateGroups.length} groups ({recordsToDelete.length} duplicates)
             </button>
           </div>
+        </div>
+      )}
+
+      {/* Merge History Tab */}
+      {activeTab === 'history' && (
+        <div className="card">
+          <h2>Merge History Viewer</h2>
+          <p style={{ color: '#94a3b8', marginBottom: '15px' }}>
+            View the audit trail of all client merge operations stored in dedupe_history.
+          </p>
+
+          {/* Fetch button */}
+          <div className="btn-group" style={{ marginBottom: '20px' }}>
+            <button
+              className="primary"
+              onClick={fetchMergeHistory}
+              disabled={mergeHistoryLoading || !apiKey}
+            >
+              {mergeHistoryLoading ? 'Loading...' : 'Fetch Merge History'}
+            </button>
+            {mergeHistory.length > 0 && (
+              <button className="success" onClick={exportMergeHistoryJSON}>
+                Export JSON
+              </button>
+            )}
+          </div>
+
+          {/* Stats */}
+          {mergeHistory.length > 0 && (
+            <>
+              <div className="stats-grid" style={{ marginBottom: '20px' }}>
+                <div className="stat-card info">
+                  <div className="number">{mergeHistory.length}</div>
+                  <div className="label">Merge Events</div>
+                </div>
+                <div className="stat-card success">
+                  <div className="number">{[...new Set(mergeHistory.map(e => e._clientRecordId))].length}</div>
+                  <div className="label">Clients with Merges</div>
+                </div>
+                <div className="stat-card warning">
+                  <div className="number">{mergeHistory.reduce((sum, e) => sum + (e.merged_in?.length || 0), 0)}</div>
+                  <div className="label">Records Absorbed</div>
+                </div>
+                <div className="stat-card">
+                  <div className="number" style={{ color: '#a5b4fc' }}>{[...new Set(mergeHistory.map(e => e.batch))].length}</div>
+                  <div className="label">Unique Batches</div>
+                </div>
+              </div>
+
+              {/* View mode and search */}
+              <div className="filter-controls" style={{ marginBottom: '15px' }}>
+                <span style={{ color: '#94a3b8' }}>View by:</span>
+                <button
+                  className={historyViewMode === 'timeline' ? 'primary' : ''}
+                  onClick={() => setHistoryViewMode('timeline')}
+                  style={{ padding: '5px 10px' }}
+                >
+                  Timeline
+                </button>
+                <button
+                  className={historyViewMode === 'by-client' ? 'primary' : ''}
+                  onClick={() => setHistoryViewMode('by-client')}
+                  style={{ padding: '5px 10px' }}
+                >
+                  By Client
+                </button>
+                <button
+                  className={historyViewMode === 'by-batch' ? 'primary' : ''}
+                  onClick={() => setHistoryViewMode('by-batch')}
+                  style={{ padding: '5px 10px' }}
+                >
+                  By Batch
+                </button>
+                <input
+                  type="text"
+                  placeholder="Search name, A#, batch ID..."
+                  value={historySearch}
+                  onChange={e => setHistorySearch(e.target.value)}
+                  style={{ maxWidth: '250px' }}
+                />
+              </div>
+
+              {/* Timeline View */}
+              {historyViewMode === 'timeline' && (
+                <div className="table-container">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Timestamp</th>
+                        <th>Client</th>
+                        <th>A#</th>
+                        <th>Batch</th>
+                        <th>Merged In</th>
+                        <th>Deltas</th>
+                        <th>Key</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {filteredMergeHistory.slice(0, 100).map((event, idx) => (
+                        <tr key={idx}>
+                          <td style={{ whiteSpace: 'nowrap' }}>{formatTimestamp(event.ts)}</td>
+                          <td>{event._clientName}</td>
+                          <td><code>{event._aNumber || '-'}</code></td>
+                          <td><code style={{ color: '#a5b4fc' }}>{event.batch}</code></td>
+                          <td>
+                            <span className="badge warning" style={{ background: '#f59e0b' }}>
+                              {event.merged_in?.length || 0} records
+                            </span>
+                          </td>
+                          <td style={{ fontSize: '0.85em' }}>
+                            {Object.keys(event.deltas || {}).length > 0 ? (
+                              Object.entries(event.deltas).map(([field, delta], i) => (
+                                <div key={i} style={{ color: '#10b981' }}>
+                                  {field}: {formatDelta(field, delta)}
+                                </div>
+                              ))
+                            ) : (
+                              <span style={{ color: '#64748b' }}>
+                                {event._legacy ? event._legacy_fields_merged?.join(', ') || 'legacy' : 'no changes'}
+                              </span>
+                            )}
+                          </td>
+                          <td><code style={{ color: '#94a3b8' }}>{event.key}</code></td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  {filteredMergeHistory.length > 100 && (
+                    <p style={{ color: '#94a3b8', marginTop: '10px', textAlign: 'center' }}>
+                      Showing first 100 of {filteredMergeHistory.length} events
+                    </p>
+                  )}
+                </div>
+              )}
+
+              {/* By Client View */}
+              {historyViewMode === 'by-client' && (
+                <div className="table-container">
+                  {Object.values(historyByClient)
+                    .sort((a, b) => b.totalMerged - a.totalMerged)
+                    .slice(0, 50)
+                    .map((client, idx) => (
+                    <div key={idx} style={{ marginBottom: '15px', background: '#1e293b', borderRadius: '8px', padding: '15px' }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '10px' }}>
+                        <div>
+                          <strong style={{ color: '#a5b4fc' }}>{client.clientName}</strong>
+                          {client.aNumber && <code style={{ marginLeft: '10px', color: '#94a3b8' }}>{client.aNumber}</code>}
+                        </div>
+                        <div>
+                          <span className="badge" style={{ background: '#10b981' }}>
+                            {client.events.length} merge{client.events.length !== 1 ? 's' : ''}
+                          </span>
+                          <span className="badge warning" style={{ marginLeft: '5px', background: '#f59e0b' }}>
+                            {client.totalMerged} absorbed
+                          </span>
+                        </div>
+                      </div>
+                      <table style={{ fontSize: '0.85em' }}>
+                        <thead>
+                          <tr>
+                            <th>Date</th>
+                            <th>Batch</th>
+                            <th>Merged</th>
+                            <th>Changes</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {client.events.map((event, eIdx) => (
+                            <tr key={eIdx}>
+                              <td>{formatTimestamp(event.ts)}</td>
+                              <td><code style={{ color: '#a5b4fc' }}>{event.batch}</code></td>
+                              <td>{event.merged_in?.length || 0}</td>
+                              <td>
+                                {Object.entries(event.deltas || {}).map(([field, delta], i) => (
+                                  <span key={i} style={{ marginRight: '10px', color: '#10b981' }}>
+                                    {field}: {formatDelta(field, delta)}
+                                  </span>
+                                ))}
+                                {Object.keys(event.deltas || {}).length === 0 && (
+                                  <span style={{ color: '#64748b' }}>
+                                    {event._legacy ? 'legacy' : 'no field changes'}
+                                  </span>
+                                )}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  ))}
+                  {Object.keys(historyByClient).length > 50 && (
+                    <p style={{ color: '#94a3b8', textAlign: 'center' }}>
+                      Showing first 50 of {Object.keys(historyByClient).length} clients
+                    </p>
+                  )}
+                </div>
+              )}
+
+              {/* By Batch View */}
+              {historyViewMode === 'by-batch' && (
+                <div className="table-container">
+                  {Object.values(historyByBatch)
+                    .sort((a, b) => new Date(b.lastTs) - new Date(a.lastTs))
+                    .map((batch, idx) => (
+                    <div key={idx} style={{ marginBottom: '15px', background: '#1e293b', borderRadius: '8px', padding: '15px' }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '10px' }}>
+                        <div>
+                          <code style={{ color: '#a5b4fc', fontSize: '1.1em' }}>{batch.batch}</code>
+                          <span style={{ marginLeft: '15px', color: '#94a3b8' }}>
+                            {formatTimestamp(batch.firstTs)}
+                          </span>
+                        </div>
+                        <span className="badge" style={{ background: '#6366f1' }}>
+                          {batch.events.length} client{batch.events.length !== 1 ? 's' : ''} merged
+                        </span>
+                      </div>
+                      <table style={{ fontSize: '0.85em' }}>
+                        <thead>
+                          <tr>
+                            <th>Client</th>
+                            <th>A#</th>
+                            <th>Records Absorbed</th>
+                            <th>Field Changes</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {batch.events.map((event, eIdx) => (
+                            <tr key={eIdx}>
+                              <td>{event._clientName}</td>
+                              <td><code>{event._aNumber || '-'}</code></td>
+                              <td>
+                                <span className="badge warning" style={{ background: '#f59e0b' }}>
+                                  {event.merged_in?.length || 0}
+                                </span>
+                              </td>
+                              <td>
+                                {Object.entries(event.deltas || {}).map(([field, delta], i) => (
+                                  <span key={i} style={{ marginRight: '10px', color: '#10b981' }}>
+                                    {field}: {formatDelta(field, delta)}
+                                  </span>
+                                ))}
+                                {Object.keys(event.deltas || {}).length === 0 && (
+                                  <span style={{ color: '#64748b' }}>no field changes</span>
+                                )}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </>
+          )}
+
+          {/* No history message */}
+          {mergeHistory.length === 0 && !mergeHistoryLoading && (
+            <div style={{ textAlign: 'center', padding: '40px', color: '#94a3b8' }}>
+              <p>No merge history loaded yet.</p>
+              <p style={{ fontSize: '0.9em' }}>Click "Fetch Merge History" to load the audit trail from Airtable.</p>
+            </div>
+          )}
         </div>
       )}
 
